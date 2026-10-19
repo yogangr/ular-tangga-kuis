@@ -1,0 +1,21 @@
+{
+  "name": "ular-tangga-kuis",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "cek-db": "node --env-file=.env.local scripts/cek-db.mjs",
+    "seed": "node --env-file=.env.local scripts/seed.mjs",
+    "seed:umum": "node --env-file=.env.local scripts/seed-umum.mjs",
+    "seed:level": "node --env-file=.env.local scripts/seed-level.mjs",
+    "setup-db": "npm run seed && npm run seed:umum && npm run seed:level"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.0",
+    "next": "^15.5.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
