@@ -15,17 +15,46 @@ class E extends Error { constructor(m, status = 400) { super(m); this.status = s
 
 // Tabel dibuat otomatis saat pertama dipakai
 let ready;
-const ensure = () => (ready ??= sql`create table if not exists ut_rooms(
-  id text primary key, level text not null, mode text not null,
-  state jsonb not null, version int not null default 0, updated_at timestamptz not null default now())`
-  .catch((e) => { ready = undefined; throw e; }));
+const ensure = () => (ready ??= (async () => {
+  await sql`create table if not exists ut_rooms(
+    id text primary key, level text not null, mode text not null,
+    state jsonb not null, version int not null default 0, updated_at timestamptz not null default now(),
+    seen jsonb not null default '{}'::jsonb)`;
+  await sql`alter table ut_rooms add column if not exists seen jsonb not null default '{}'::jsonb`;
+})().catch((e) => { ready = undefined; throw e; }));
+
+const HEARTBEAT_MS = 20000; // seberapa sering "tanda hidup" pemain dicatat
+const STALE_MS = 60000;     // pemain tanpa tanda hidup selama ini dikeluarkan otomatis
+// Permainan baru berakhir saat pemain yang masih berlomba (belum finis, belum keluar)
+// tinggal sebanyak ini. Contoh dengan angka 2: di room 4 pemain, setelah dua orang finis
+// permainan selesai dan dua sisanya diurutkan menurut posisi di papan.
+// Ubah menjadi 1 kalau ingin sampai tinggal satu pemain.
+const STOP_AT = 2;
+const active = (s) => s.players.filter((p) => !p.left);
+const racing = (s) => s.players.filter((p) => !p.left && !p.done);
+
+// Cek apakah permainan harus berakhir. Kalau ya, susun peringkat akhir.
+function settle(s) {
+  const rest0 = racing(s);
+  const finished = s.finishOrder.length;
+  const over = rest0.length === 0 || (finished > 0 && rest0.length <= STOP_AT) || (finished === 0 && rest0.length <= 1);
+  if (!over) return false;
+  const rest = [...rest0].sort((a, b) => b.pos - a.pos || a.id - b.id);
+  const order = [...s.finishOrder, ...rest.map((p) => p.id)];
+  order.forEach((pid, i) => { s.players[pid].rank = i + 1; });
+  s.ranking = order;
+  s.winner = order.length ? order[0] : null;
+  s.status = 'finished'; s.phase = 'done'; s.q = null;
+  return true;
+}
 
 // Data yang boleh dilihat pemain (tanpa token rahasia dan tanpa kunci jawaban)
 const pub = (row, s) => ({
   id: row.id, level: row.level, mode: row.mode, version: row.version,
   status: s.status, host: s.host, turn: s.turn, phase: s.phase, q: s.q, last: s.last,
-  dice: s.dice, log: s.log, winner: s.winner,
-  players: s.players.map(({ id, name, pos, color }) => ({ id, name, pos, color })),
+  dice: s.dice, move: s.move ?? null, log: s.log, winner: s.winner,
+  players: s.players.map(({ id, name, pos, color, left, done, rank }) => ({ id, name, pos, color, left: !!left, done: !!done, rank: rank ?? null })),
+  ranking: s.ranking ?? [],
 });
 
 // Ambil satu soal acak dari bank soal sesuai tingkat, hindari soal yang baru dipakai
@@ -43,7 +72,11 @@ async function pickQ(level, used) {
 }
 
 async function nextTurn(s, level) {
-  s.turn = (s.turn + 1) % s.players.length;
+  const n = s.players.length;
+  for (let i = 1; i <= n; i++) {
+    const t = (s.turn + i) % n;
+    if (!s.players[t].left && !s.players[t].done) { s.turn = t; break; }
+  }
   s.phase = 'answer';
   s.q = await pickQ(level, s.used);
 }
@@ -54,13 +87,55 @@ async function mutate(id, fn) {
     const [row] = await sql`select id, level, mode, state, version from ut_rooms where id = ${id}`;
     if (!row) throw new E('Room tidak ditemukan', 404);
     const s = structuredClone(row.state);
-    await fn(s, row);
+    s.finishOrder ??= [];
+    if ((await fn(s, row)) === 'noop') return { s, row, version: row.version };
     const up = await sql`update ut_rooms set state = ${JSON.stringify(s)}::jsonb, version = version + 1, updated_at = now()
       where id = ${id} and version = ${row.version} returning version`;
     if (up.length) return { s, row, version: up[0].version };
   }
   throw new E('Server sibuk, coba lagi.', 409);
 }
+
+// Keluarkan satu pemain (tombol Keluar atau terputus). id pemain tetap dipertahankan
+// supaya posisi giliran dan warna pemain lain tidak berubah.
+async function dropPlayer(s, row, pid, why) {
+  const p = s.players[pid];
+  if (!p || p.left) return false;
+  p.left = true;
+  p.tok = null;
+  s.n = (s.n || 0) + 1;
+  const act = active(s);
+  const text = why === 'idle' ? `${p.name} terputus dan dikeluarkan dari permainan.` : `${p.name} keluar dari permainan.`;
+  say(s, text);
+  if (!act.length) return true;
+  if (s.host === pid) s.host = act[0].id;
+  if (s.status === 'playing') {
+    if (settle(s)) {
+      const tail = s.finishOrder.length ? 'Permainan selesai.' : `${s.players[s.winner].name} menang karena pemain lain sudah keluar.`;
+      s.last = { n: s.n, type: 'end', text: `${text} ${tail}` };
+    } else if (s.turn === pid) {
+      await nextTurn(s, row.level);
+      s.last = { n: s.n, type: 'left', text: `${text} Giliran ${s.players[s.turn].name}.` };
+    } else {
+      s.last = { n: s.n, type: 'left', text };
+    }
+  } else {
+    s.last = { n: s.n, type: 'left', text };
+  }
+  return true;
+}
+
+async function dropAndClean(id, pids, why) {
+  const out = await mutate(id, async (s, row) => {
+    let changed = false;
+    for (const pid of pids) if (await dropPlayer(s, row, pid, why)) changed = true;
+    return changed ? undefined : 'noop';
+  });
+  if (!active(out.s).length) { await sql`delete from ut_rooms where id = ${id}`; return null; }
+  return out;
+}
+
+const touch = (id, pid) => sql`update ut_rooms set seen = jsonb_set(coalesce(seen, '{}'::jsonb), ${[String(pid)]}::text[], to_jsonb(${Date.now()}::bigint), true) where id = ${id}`;
 
 async function create(b) {
   await ensure();
@@ -79,7 +154,7 @@ async function create(b) {
   await sql`delete from ut_rooms where updated_at < now() - interval '1 day'`;
   for (let t = 0; t < 6; t++) {
     const id = rid(5);
-    const ins = await sql`insert into ut_rooms(id, level, mode, state) values(${id}, ${level}, ${mode}, ${JSON.stringify(s)}::jsonb)
+    const ins = await sql`insert into ut_rooms(id, level, mode, state, seen) values(${id}, ${level}, ${mode}, ${JSON.stringify(s)}::jsonb, ${JSON.stringify({ 0: Date.now() })}::jsonb)
       on conflict do nothing returning id, version`;
     if (ins.length) return { id, tok, pid: 0, room: pub({ id, level, mode, version: ins[0].version }, s) };
   }
@@ -96,12 +171,15 @@ async function join(b) {
   const { s, row, version } = await mutate(id, (s, row) => {
     if (row.mode !== 'online') throw new E('Room ini dimainkan di satu perangkat.');
     if (s.status !== 'lobby') throw new E('Permainan di room ini sudah dimulai.');
-    if (s.players.length >= 6) throw new E('Room sudah penuh (maksimal 6 pemain).');
-    if (s.players.some((p) => p.name.toLowerCase() === name.toLowerCase())) throw new E('Nama itu sudah dipakai di room ini.');
+    if (active(s).length >= 6) throw new E('Room sudah penuh (maksimal 6 pemain).');
+    if (active(s).some((p) => p.name.toLowerCase() === name.toLowerCase())) throw new E('Nama itu sudah dipakai di room ini.');
     pid = s.players.length;
-    s.players.push({ id: pid, name, pos: 0, color: pid, tok });
+    const used = new Set(active(s).map((p) => p.color));
+    let color = 0; while (used.has(color)) color++;
+    s.players.push({ id: pid, name, pos: 0, color, tok });
     say(s, `${name} bergabung.`);
   });
+  await touch(id, pid);
   return { id, tok, pid, room: pub({ ...row, version }, s) };
 }
 
@@ -114,11 +192,11 @@ async function act(b) {
     if (b.action === 'start') {
       if (row.mode !== 'online' || s.status !== 'lobby') throw new E('Permainan sudah berjalan.');
       if (!tok || host.tok !== tok) throw new E('Hanya host yang bisa memulai.', 403);
-      if (s.players.length < 2) throw new E('Minimal 2 pemain untuk mulai.');
-      s.status = 'playing'; s.turn = 0; s.phase = 'answer';
+      if (active(s).length < 2) throw new E('Minimal 2 pemain untuk mulai.');
+      s.status = 'playing'; s.turn = s.players.findIndex((p) => !p.left); s.phase = 'answer';
       s.q = await pickQ(row.level, s.used);
       s.n++;
-      s.last = { n: s.n, type: 'start', text: `Permainan dimulai! Giliran ${s.players[0].name}.` };
+      s.last = { n: s.n, type: 'start', text: `Permainan dimulai! Giliran ${s.players[s.turn].name}.` };
       say(s, s.last.text);
       return;
     }
@@ -145,6 +223,7 @@ async function act(b) {
     if (b.action === 'roll') {
       if (s.phase !== 'roll') throw new E('Jawab soal dengan benar dulu sebelum mengocok dadu.');
       const d = 1 + Math.floor(Math.random() * 6);
+      const from = p.pos;
       let to = p.pos + d;
       if (to > 100) to = 200 - to; // melewati 100: memantul balik
       let end = to, kind = null;
@@ -153,22 +232,44 @@ async function act(b) {
       p.pos = end;
       s.n++;
       s.dice = { n: s.n, who: p.id, v: d };
+      s.move = { n: s.n, who: p.id, dice: d, from, to, end, kind };
       let text = `${p.name} mengocok ${d} dan sampai di kotak ${to}`;
       text += kind === 'ladder' ? `, naik tangga ke ${end}!` : kind === 'snake' ? `, dimakan ular dan turun ke ${end}.` : '.';
+      let finished = null, over = false;
       if (p.pos === 100) {
-        s.status = 'finished'; s.phase = 'done'; s.winner = p.id; s.q = null;
-        text += ` ${p.name} menang!`;
+        p.done = true;
+        p.rank = s.finishOrder.length + 1;
+        s.finishOrder.push(p.id);
+        finished = p.rank;
+        text += ` ${p.name} finis di peringkat ${p.rank}!`;
+        if (settle(s)) { over = true; text += ' Permainan selesai.'; }
+        else { await nextTurn(s, row.level); text += ` Permainan berlanjut. Giliran ${s.players[s.turn].name}.`; }
       } else {
         await nextTurn(s, row.level);
         text += ` Giliran ${s.players[s.turn].name}.`;
       }
-      s.last = { n: s.n, type: 'roll', who: p.id, dice: d, kind, text };
+      s.last = { n: s.n, type: 'roll', who: p.id, dice: d, kind, finished, over, text };
       say(s, text);
       return;
     }
     throw new E('Aksi tidak dikenal.');
   });
   return { room: pub({ ...row, version }, s) };
+}
+
+async function leave(b) {
+  await ensure();
+  const id = String(b.id || '').trim().toUpperCase();
+  const tok = b.tok ? String(b.tok) : null;
+  const [row] = await sql`select id, mode, state from ut_rooms where id = ${id}`;
+  if (!row || !tok) return { ok: true };
+  if (row.mode === 'local') {
+    if (row.state.players[row.state.host]?.tok === tok) await sql`delete from ut_rooms where id = ${id}`;
+    return { ok: true };
+  }
+  const me = row.state.players.find((p) => !p.left && p.tok === tok);
+  if (me) await dropAndClean(id, [me.id], 'leave');
+  return { ok: true };
 }
 
 const fail = (e) => {
@@ -182,8 +283,26 @@ export async function GET(req) {
     const p = new URL(req.url).searchParams;
     const id = String(p.get('id') || '').trim().toUpperCase();
     const v = Number(p.get('v') ?? -1);
-    const [row] = await sql`select id, level, mode, state, version from ut_rooms where id = ${id}`;
+    const tok = p.get('tok');
+    let [row] = await sql`select id, level, mode, state, version, seen from ut_rooms where id = ${id}`;
     if (!row) throw new E('Room tidak ditemukan.', 404);
+
+    if (row.mode === 'online') {
+      const now = Date.now();
+      const seen = row.seen || {};
+      // catat tanda hidup pemain yang sedang membuka room
+      const me = tok ? row.state.players.find((x) => !x.left && x.tok === tok) : null;
+      if (me && now - (seen[me.id] ?? 0) > HEARTBEAT_MS) { seen[me.id] = now; await touch(id, me.id); }
+      // keluarkan pemain yang sudah lama tidak terlihat (tab ditutup, koneksi putus)
+      if (row.state.status === 'lobby' || row.state.status === 'playing') {
+        const stale = active(row.state).filter((x) => now - (seen[x.id] ?? now) > STALE_MS).map((x) => x.id);
+        if (stale.length) {
+          const out = await dropAndClean(id, stale, 'idle');
+          if (!out) throw new E('Room sudah ditutup.', 404);
+          row = { ...row, state: out.s, version: out.version };
+        }
+      }
+    }
     if (row.version === v) return Response.json({ changed: false });
     return Response.json({ room: pub(row, row.state) });
   } catch (e) { return fail(e); }
@@ -194,6 +313,7 @@ export async function POST(req) {
     const b = await req.json();
     if (b.action === 'create') return Response.json(await create(b));
     if (b.action === 'join') return Response.json(await join(b));
+    if (b.action === 'leave') return Response.json(await leave(b));
     if (['start', 'answer', 'roll'].includes(b.action)) return Response.json(await act(b));
     throw new E('Aksi tidak dikenal.');
   } catch (e) { return fail(e); }

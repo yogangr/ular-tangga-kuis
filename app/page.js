@@ -1,18 +1,14 @@
 'use client';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { SNAKES, LADDERS, COLORS, LEVELS } from '../lib/utboard';
+import { useEffect, useRef, useState } from 'react';
+import { SNAKES, LADDERS, COLORS, LEVELS, cx, snakePts, hopSquares } from '../lib/utboard';
 
 const LNAME = Object.fromEntries(LEVELS.map(([k, n]) => [k, n]));
 const SC = ['#EF4444', '#16A34A', '#8B5CF6', '#F59E0B'];
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
-const OFF = [[-9, -9], [9, -9], [-9, 9], [9, 9], [0, -11], [0, 11]];
+const OFF = [[-7, -4], [7, -4], [-7, 4], [7, 4], [0, -8], [0, 8]]; // geser kecil kalau satu kotak diisi banyak pemain
+const HOP = 230; // lama satu lompatan (ms)
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// pusat kotak n dalam koordinat 0..100 (kotak 1 di kiri bawah, jalur zig-zag)
-const cx = (n) => {
-  const r = Math.floor((n - 1) / 10), k = (n - 1) % 10, c = r % 2 ? 9 - k : k;
-  return [c * 10 + 5, (9 - r) * 10 + 5];
-};
+const makePieces = () => Array.from({ length: 50 }, (_, k) => ({ l: Math.random() * 100, c: COLORS[k % 6], d: Math.random() * 0.9, t: 2.6 + Math.random() * 1.8, s: 6 + Math.random() * 7, r: 360 + Math.random() * 540 }));
 
 function Dice({ v, rolling }) {
   const [t, setT] = useState(1);
@@ -46,15 +42,11 @@ function Ladder({ a, b }) {
 }
 
 function Snake({ a, b, color }) {
-  const [x1, y1] = cx(a), [x2, y2] = cx(b);
-  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy), nx = -dy / L, ny = dx / L;
-  const pts = Array.from({ length: 21 }, (_, i) => {
-    const t = i / 20, o = Math.sin(t * Math.PI * 4) * 2.2 * (0.35 + 0.65 * (1 - t));
-    return `${(x1 + dx * t + nx * o).toFixed(2)},${(y1 + dy * t + ny * o).toFixed(2)}`;
-  }).join(' ');
+  const pts = snakePts(a, b, 40);
+  const [x1, y1] = pts[0];
   return (
     <g>
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" opacity=".9" />
+      <polyline points={pts.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" opacity=".9" />
       <circle cx={x1} cy={y1} r="2.2" fill={color} />
       <circle cx={x1 - 0.7} cy={y1 - 0.5} r=".5" fill="#fff" />
       <circle cx={x1 + 0.7} cy={y1 - 0.5} r=".5" fill="#fff" />
@@ -62,7 +54,78 @@ function Snake({ a, b, color }) {
   );
 }
 
-function Board({ players }) {
+// Ikon pemain: pin lokasi (seperti penanda GPS) berwarna sesuai pemain, berisi huruf awal nama
+function Pin({ color, label, fx }) {
+  return (
+    <svg viewBox="0 0 30 40" className={'ut-pin ' + fx} aria-hidden="true">
+      <path d="M15 39C15 39 2.5 24.5 2.5 14.5a12.5 12.5 0 0 1 25 0C27.5 24.5 15 39 15 39z" fill={color} stroke="#fff" strokeWidth="2.2" strokeLinejoin="round" />
+      <circle cx="15" cy="14.5" r="6.4" fill="#fff" />
+      <text x="15" y="18" textAnchor="middle" fontSize="9.5" fontWeight="800" fill={color}>{label}</text>
+    </svg>
+  );
+}
+
+function Board({ players, move, turn, playing }) {
+  const [pawns, setPawns] = useState(() => Object.fromEntries(
+    players.filter((p) => p.pos > 0).map((p) => { const [x, y] = cx(p.pos); return [p.id, { x, y, dur: 0, fx: '', k: 0 }]; })));
+  const latest = useRef(players); latest.current = players;
+  const seen = useRef(move?.n ?? 0); // langkah yang sudah ada saat papan dibuka tidak dianimasikan ulang
+  const queue = useRef([]);
+  const running = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+
+  const put = (id, x, y, dur, fx) => setPawns((s) => ({ ...s, [id]: { x, y, dur, fx, k: (s[id]?.k || 0) + 1 } }));
+  const sync = () => setPawns(Object.fromEntries(latest.current.filter((p) => p.pos > 0).map((p) => { const [x, y] = cx(p.pos); return [p.id, { x, y, dur: 0, fx: '', k: 0 }]; })));
+
+  // Mainkan satu langkah: lompat kotak demi kotak, lalu naik tangga / meluncur di tubuh ular
+  async function play(m) {
+    const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { const [x, y] = cx(m.end); put(m.who, x, y, 0, ''); await wait(300); return; }
+    if (m.from > 0) { const [x, y] = cx(m.from); put(m.who, x, y, 0, ''); await wait(30); }
+    const path = hopSquares(m.from, m.dice);
+    for (let i = 0; i < path.length; i++) {
+      if (!alive.current) return;
+      const [x, y] = cx(path[i]);
+      if (i === 0 && m.from === 0) { put(m.who, x, y, 0, 'drop'); await wait(480); }
+      else { put(m.who, x, y, HOP, 'hop'); await wait(HOP); }
+    }
+    if (m.kind === 'ladder') {
+      await wait(120);
+      const [x1, y1] = cx(m.to), [x2, y2] = cx(m.end);
+      const steps = Math.min(14, Math.max(3, Math.round(Math.hypot(x2 - x1, y2 - y1) / 7)));
+      for (let i = 1; i <= steps; i++) {
+        if (!alive.current) return;
+        put(m.who, x1 + ((x2 - x1) * i) / steps, y1 + ((y2 - y1) * i) / steps, 150, 'climb');
+        await wait(150);
+      }
+    } else if (m.kind === 'snake') {
+      await wait(180);
+      const [x1, y1] = cx(m.to), [x2, y2] = cx(m.end);
+      const N = Math.min(56, Math.max(18, Math.round(Math.hypot(x2 - x1, y2 - y1) * 1.5)));
+      const pts = snakePts(m.to, m.end, N);
+      for (let i = 1; i < pts.length; i++) {
+        if (!alive.current) return;
+        put(m.who, pts[i][0], pts[i][1], 40, 'slide');
+        await wait(40);
+      }
+    }
+    await wait(150);
+  }
+
+  useEffect(() => {
+    if (!move || move.n <= seen.current) return;
+    seen.current = move.n;
+    queue.current.push(move);
+    if (running.current) return;
+    (async () => {
+      running.current = true;
+      while (queue.current.length && alive.current) await play(queue.current.shift());
+      running.current = false;
+      if (alive.current) sync();
+    })();
+  }, [move?.n]);
+
   const cells = [];
   for (let r = 9; r >= 0; r--) {
     for (let c = 0; c < 10; c++) {
@@ -70,6 +133,7 @@ function Board({ players }) {
       cells.push(<div key={n} className={'ut-cell ' + ((r + c) % 2 ? 'a' : 'b') + (n === 100 ? ' end' : '')}>{n}</div>);
     }
   }
+
   return (
     <div className="ut-board">
       <div className="ut-grid">{cells}</div>
@@ -77,11 +141,20 @@ function Board({ players }) {
         {Object.entries(LADDERS).map(([a, b]) => <Ladder key={a} a={+a} b={b} />)}
         {Object.entries(SNAKES).map(([a, b], i) => <Snake key={a} a={+a} b={b} color={SC[i % SC.length]} />)}
       </svg>
-      {players.filter((p) => p.pos > 0).map((p) => {
-        const [x, y] = cx(p.pos), o = OFF[p.id % 6];
+      {players.map((p) => {
+        let s = pawns[p.id];
+        if (!s) {
+          if (p.pos <= 0) return null;
+          if (move && move.who === p.id && move.n > seen.current) return null; // tunggu animasinya mulai
+          const [x, y] = cx(p.pos); s = { x, y, dur: 0, fx: '', k: 0 };
+        }
+        const o = OFF[p.id % 6];
+        const fx = s.fx || (playing && turn === p.id ? 'idle' : '');
         return (
-          <div key={p.id} className="ut-pawn" title={p.name}
-            style={{ left: x + '%', top: y + '%', background: COLORS[p.color], transform: `translate(calc(-50% + ${o[0]}px), calc(-50% + ${o[1]}px))` }} />
+          <div key={p.id} className={'ut-pawn' + (s.fx ? ' go' : '')} title={p.name}
+            style={{ left: s.x + '%', top: s.y + 3 + '%', transitionDuration: s.dur + 'ms', transform: `translate(calc(-50% + ${o[0]}px), calc(-100% + ${o[1]}px))` }}>
+            <Pin key={s.k} color={COLORS[p.color]} label={(p.name[0] || '?').toUpperCase()} fx={fx} />
+          </div>
         );
       })}
     </div>
@@ -91,11 +164,12 @@ function Board({ players }) {
 function PlayerList({ room }) {
   return (
     <ul className="ut-players">
-      {room.players.map((p) => (
+      {room.players.filter((p) => !p.left).map((p) => (
         <li key={p.id} className={room.status === 'playing' && room.turn === p.id ? 'cur' : ''}>
           <span className="ut-dot" style={{ background: COLORS[p.color] }} />
           {p.name}{p.id === room.host && room.mode === 'online' ? ' (host)' : ''}
-          <small>{room.status === 'lobby' ? '' : p.pos ? `Kotak ${p.pos}` : 'Start'}</small>
+          <small>{room.status === 'lobby' ? '' : p.done ? `Finis · peringkat ${p.rank}`
+            : room.status === 'finished' && p.rank ? `Peringkat ${p.rank} · kotak ${p.pos}` : p.pos ? `Kotak ${p.pos}` : 'Start'}</small>
         </li>
       ))}
     </ul>
@@ -114,7 +188,8 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [rolling, setRolling] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [party, setParty] = useState(false);
+  const [party, setParty] = useState(null);
+  const partySeen = useRef(null);
   const ver = useRef(-1);
 
   const api = async (body) => {
@@ -130,7 +205,14 @@ export default function Page() {
     localStorage.setItem('ut-last', JSON.stringify(m));
   };
   const run = async (fn) => { setErr(''); setBusy(true); try { await fn(); } catch (e) { setErr(e.message); } setBusy(false); };
-  const leave = () => { setRoom(null); setMe(null); setResume(null); setErr(''); localStorage.removeItem('ut-last'); };
+  // Keluar dari room: server menghapus pemain ini dari daftar (room lokal ikut dihapus)
+  const leave = (msg = '') => {
+    if (me) {
+      fetch('/api/ut', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ action: 'leave', id: me.id, tok: me.tok }) }).catch(() => {});
+    }
+    setRoom(null); setMe(null); setResume(null); setErr(msg); localStorage.removeItem('ut-last');
+  };
 
   useEffect(() => {
     setName(localStorage.getItem('kuis-name') || '');
@@ -148,7 +230,8 @@ export default function Page() {
     if (!me) return;
     const t = setInterval(async () => {
       try {
-        const r = await fetch(`/api/ut?id=${me.id}&v=${ver.current}`, { cache: 'no-store' });
+        const r = await fetch(`/api/ut?id=${me.id}&v=${ver.current}&tok=${me.tok}`, { cache: 'no-store' });
+        if (r.status === 404) { leave('Room sudah ditutup.'); return; }
         const d = await r.json();
         if (r.ok && d.room) apply(d.room);
       } catch {}
@@ -157,15 +240,22 @@ export default function Page() {
   }, [me]);
 
   useEffect(() => {
-    if (room?.status !== 'finished') return;
-    setParty(true);
-    const t = setTimeout(() => setParty(false), 5200);
-    return () => clearTimeout(t);
-  }, [room?.status]);
+    if (me && room && room.mode === 'online' && room.players[me.pid]?.left) leave('Kamu dikeluarkan dari room karena tidak aktif.');
+  }, [room]);
 
-  const pieces = useMemo(() => (room?.status === 'finished'
-    ? Array.from({ length: 50 }, (_, k) => ({ l: Math.random() * 100, c: COLORS[k % 6], d: Math.random() * 0.9, t: 2.6 + Math.random() * 1.8, s: 6 + Math.random() * 7, r: 360 + Math.random() * 540 }))
-    : []), [room?.status]);
+  // Rayakan tiap pemain yang finis (setelah bidaknya selesai bergerak)
+  useEffect(() => {
+    if (!room) { partySeen.current = null; return; }
+    const n = room.last?.n ?? 0;
+    if (partySeen.current === null) { partySeen.current = n; return; } // kejadian lama tidak dirayakan ulang
+    if (n <= partySeen.current) return;
+    partySeen.current = n;
+    const l = room.last;
+    if (l?.type !== 'roll' || !l.finished) return;
+    const title = room.players[l.who].name;
+    const sub = l.finished === 1 ? 'finis pertama, juara 1!' : `finis di peringkat ${l.finished}!`;
+    setTimeout(() => { setParty({ title, sub, pieces: makePieces() }); setTimeout(() => setParty(null), 5200); }, 1500);
+  }, [room]);
 
   const needName = () => { if (!name.trim()) { setErr('Isi nama dulu.'); return true; } localStorage.setItem('kuis-name', name.trim()); localStorage.setItem('kuis-level', level); return false; };
   const createOnline = () => { if (!needName()) run(async () => enter(await api({ action: 'create', mode: 'online', name, level }))); };
@@ -195,7 +285,7 @@ export default function Page() {
       <main>
         <div className="card">
           <h1>Ular Tangga Kuis</h1>
-          <p className="mute">Jawab soal dengan benar untuk boleh mengocok dadu. Jawaban salah membuat giliranmu dilewati. Yang lebih dulu sampai kotak 100 menang.</p>
+          <p className="mute">Jawab soal dengan benar untuk boleh mengocok dadu. Jawaban salah membuat giliranmu dilewati. Pemain yang sampai kotak 100 mendapat peringkat. Kalau pemainnya banyak, permainan berlanjut sampai tinggal 2 pemain yang belum finis.</p>
         </div>
         {resume && (
           <div className="card">
@@ -249,6 +339,7 @@ export default function Page() {
   }
 
   /* ---------- Room ---------- */
+  const activeCount = room.players.filter((p) => !p.left).length;
   const cur = room.players[room.turn];
   const mine = room.mode === 'local' || room.turn === me.pid;
   const winner = room.winner != null ? room.players[room.winner] : null;
@@ -261,7 +352,7 @@ export default function Page() {
         <div>
           <b>Ular Tangga Kuis</b> <span className="mute">· Room {room.id} · {LNAME[room.level]}{room.mode === 'local' ? ' · 1 perangkat' : ''}</span>
         </div>
-        <button className="btn alt" style={{ width: 'auto', marginTop: 0, padding: '8px 16px' }} onClick={leave}>Keluar</button>
+        <button className="btn alt" style={{ width: 'auto', marginTop: 0, padding: '8px 16px' }} onClick={() => leave()}>Keluar</button>
       </div>
 
       {room.status === 'lobby' && (
@@ -272,8 +363,8 @@ export default function Page() {
           <button className="btn alt" onClick={copy}>{copied ? 'Tautan tersalin!' : 'Salin tautan undangan'}</button>
           <PlayerList room={room} />
           {me.pid === room.host
-            ? <button className="btn" onClick={() => act('start')} disabled={busy || room.players.length < 2}>
-                {room.players.length < 2 ? 'Menunggu pemain lain...' : `Mulai permainan (${room.players.length} pemain)`}
+            ? <button className="btn" onClick={() => act('start')} disabled={busy || activeCount < 2}>
+                {activeCount < 2 ? 'Menunggu pemain lain...' : `Mulai permainan (${activeCount} pemain)`}
               </button>
             : <p className="hint">Menunggu host memulai permainan...</p>}
           {err && <p className="err">{err}</p>}
@@ -282,16 +373,19 @@ export default function Page() {
 
       {room.status !== 'lobby' && (
         <div className="ut-game">
-          <Board players={room.players} />
+          <Board players={room.players.filter((p) => !p.left)} move={room.move} turn={room.turn} playing={room.status === 'playing'} />
           <div>
             <div className="card">
               <div className="ut-turn">
                 <span className="ut-dot" style={{ background: COLORS[(winner || cur).color] }} />
                 {room.status === 'finished'
-                  ? `${winner.name} menang!`
+                  ? (winner ? `${winner.name} juara 1!` : 'Permainan selesai')
                   : `Giliran ${cur.name}${room.mode === 'online' && mine ? ' (kamu)' : ''}`}
               </div>
               {last && <div className={'ut-banner' + tone} role="status">{last.text}</div>}
+              {room.mode === 'online' && room.status === 'playing' && room.players[me.pid]?.done && (
+                <p className="hint">Kamu sudah finis di peringkat {room.players[me.pid].rank}. Menunggu pemain lain...</p>
+              )}
 
               {room.status === 'playing' && room.phase === 'answer' && room.q && (
                 <>
@@ -315,7 +409,23 @@ export default function Page() {
               )}
 
               {room.status === 'finished' && (
-                <button className="btn sun" onClick={leave}>Main lagi</button>
+                <>
+                  <h2 style={{ marginTop: 14 }}>Peringkat akhir</h2>
+                  <ol className="ut-ranking">
+                    {room.ranking.map((pid, i) => {
+                      const p = room.players[pid];
+                      return (
+                        <li key={pid}>
+                          <span className={'ut-rank r' + Math.min(i + 1, 4)}>{i + 1}</span>
+                          <span className="ut-dot" style={{ background: COLORS[p.color] }} />
+                          {p.name}{p.left ? ' (keluar)' : ''}
+                          <small>{p.done ? 'Finis' : `Kotak ${p.pos}`}</small>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  <button className="btn sun" onClick={() => leave()}>Main lagi</button>
+                </>
               )}
               {err && <p className="err">{err}</p>}
             </div>
@@ -332,14 +442,14 @@ export default function Page() {
         </div>
       )}
 
-      {party && winner && (
+      {party && (
         <div className="party" role="status">
-          {pieces.map((p, k) => (
+          {party.pieces.map((p, k) => (
             <i key={k} style={{ left: p.l + '%', width: p.s, height: p.s * 1.6, background: p.c, '--t': p.t + 's', '--d': p.d + 's', '--r2': p.r + 'deg' }} />
           ))}
           <div className="pop">
-            <b>{winner.name}</b>
-            <span className="mute">memenangkan permainan!</span>
+            <b>{party.title}</b>
+            <span className="mute">{party.sub}</span>
           </div>
         </div>
       )}
