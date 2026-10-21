@@ -1,10 +1,17 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { SNAKES, LADDERS, COLORS, LEVELS, ANIMALS, cx, snakePts, hopSquares } from '../lib/utboard';
+import { SNAKES, LADDERS, COLORS, LEVELS, ANIMALS, SKILLS, cx, snakePts, hopSquares } from '../lib/utboard';
 
 const LNAME = Object.fromEntries(LEVELS.map(([k, n]) => [k, n]));
 const AMAP = Object.fromEntries(ANIMALS.map(([k, e, n]) => [k, { e, n }]));
-const face = (p) => AMAP[p.animal]?.e ?? ANIMALS[p.color % ANIMALS.length][1]; // emoji hewan pemain
+const face = (p) => (p.animal ? AMAP[p.animal]?.e ?? '🐾' : '❓'); // emoji hewan pemain (❓ = belum dibagikan)
+const ruleText = (r) => (r > 0 ? `Skill pulih setelah ${r} jawaban benar beruntun.` : 'Skill hanya bisa dipakai 1× per permainan.');
+const ROLL_SKILLS = ['kelinci', 'katak', 'penguin']; // skill yang langsung mengocok dadu
+const skillLine = (p, recharge) => {
+  const sk = SKILLS[p.animal];
+  const st = !p.spent ? (sk.when === 'passive' ? 'aktif' : 'siap') : recharge > 0 ? `terpakai, pulih ${p.streak}/${recharge}` : 'terpakai';
+  return `${sk.name} · ${st}${p.skip ? ' · akan dilewati' : ''}`;
+};
 const SC = ['#EF4444', '#16A34A', '#8B5CF6', '#F59E0B'];
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
 const OFF = [[-7, -4], [7, -4], [-7, 4], [7, 4], [0, -8], [0, 8]]; // geser kecil kalau satu kotak diisi banyak pemain
@@ -84,9 +91,9 @@ function Board({ players, move, turn, playing }) {
   async function play(m) {
     const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     if (reduce) { const [x, y] = cx(m.end); put(m.who, x, y, 0, ''); await wait(300); return; }
-    if (m.kind === 'reset') { // tiga kali 6: bidak meluncur balik ke kotak awal
+    if (m.kind === 'reset' || m.kind === 'push') { // tiga kali 6 / Terkam: bidak meluncur mundur
       if (m.from > 0) { const [x0, y0] = cx(m.from); put(m.who, x0, y0, 0, ''); await wait(30); }
-      await wait(700); // beri waktu dadu terlihat dulu
+      await wait(m.kind === 'reset' ? 700 : 300); // beri waktu dadu terlihat dulu
       const [x, y] = cx(m.end);
       if (m.from === 0) { put(m.who, x, y, 0, 'drop'); await wait(480); }
       else { put(m.who, x, y, 700, 'slide'); await wait(700); }
@@ -182,9 +189,91 @@ function PlayerList({ room }) {
           {p.name}{p.id === room.host && room.mode === 'online' ? ' (host)' : ''}
           <small>{room.status === 'lobby' ? '' : p.done ? `Finis · peringkat ${p.rank}`
             : room.status === 'finished' && p.rank ? `Peringkat ${p.rank} · kotak ${p.pos}` : p.pos ? `Kotak ${p.pos}` : 'Start'}</small>
+          {room.status !== 'lobby' && p.animal && SKILLS[p.animal] && <span className="ut-sk">{skillLine(p, room.recharge)}</span>}
         </li>
       ))}
     </ul>
+  );
+}
+
+// Pengaturan pemulihan skill: 0 = sekali per permainan, 1-10 = pulih setelah N jawaban benar beruntun
+function SkillRule({ value, onChange, disabled }) {
+  const recharge = value > 0;
+  return (
+    <div className="ut-rule">
+      <div className="lv" role="radiogroup" aria-label="Aturan pemakaian skill">
+        <button role="radio" aria-checked={!recharge} className={!recharge ? 'on' : ''} disabled={disabled} onClick={() => onChange(0)}>
+          <b>1× per permainan</b><small>Skill hanya dipakai sekali</small>
+        </button>
+        <button role="radio" aria-checked={recharge} className={recharge ? 'on' : ''} disabled={disabled} onClick={() => onChange(value || 3)}>
+          <b>Pulih lewat kuis</b><small>Aktif lagi setelah jawab benar beruntun</small>
+        </button>
+      </div>
+      {recharge && (
+        <div className="ut-rule-n">
+          <label htmlFor="rc">Pulih setelah jawab benar beruntun sebanyak</label>
+          <select id="rc" value={value} disabled={disabled} onChange={(e) => onChange(+e.target.value)}>
+            {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n} kali</option>)}
+          </select>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Daftar semua hewan dan skill-nya (terbuka untuk semua pemain)
+function AnimalGuide() {
+  return (
+    <ul className="ut-guide">
+      {ANIMALS.map(([k, e, n]) => (
+        <li key={k}><span className="ut-face" aria-hidden="true">{e}</span><div><b>{n}: {SKILLS[k].name}</b><small>{SKILLS[k].desc}</small></div></li>
+      ))}
+    </ul>
+  );
+}
+
+// Kartu skill untuk pemain yang sedang giliran
+function SkillPanel({ room, busy, onUse }) {
+  const p = room.players[room.turn];
+  const sk = p && SKILLS[p.animal];
+  if (!sk || room.status !== 'playing' || p.done) return null;
+  const ph = room.phase, ready = !p.spent;
+  const targets = room.players.filter((x) => !x.left && !x.done && x.id !== p.id);
+  let body;
+  if (sk.when === 'passive') body = null;
+  else if (!ready) body = <p className="hint">Skill sudah terpakai{room.recharge > 0 ? `. Jawab benar beruntun ${room.recharge - p.streak} kali lagi untuk memulihkannya.` : '.'}</p>;
+  else if (sk.when === 'answer') {
+    body = <button className="btn alt" disabled={busy || ph !== 'answer' || (p.animal === 'rubah' && (room.q?.options.length ?? 0) <= 2)} onClick={() => onUse({})}>Pakai {sk.name}</button>;
+  } else if (p.animal === 'penguin') {
+    body = (
+      <>
+        <p className="hint">Pilih angka dadu (langsung jalan, tanpa mengocok):</p>
+        {[1, 2, 3, 4, 5].map((v) => <button key={v} className="btn alt" disabled={busy || ph !== 'roll'} onClick={() => onUse({ value: v })}>{v}</button>)}
+      </>
+    );
+  } else if (sk.when === 'roll') {
+    body = <button className="btn alt" disabled={busy || ph !== 'roll'} onClick={() => onUse({})}>Pakai {sk.name} (langsung kocok)</button>;
+  } else {
+    body = (
+      <>
+        <p className="hint">Pilih lawan:</p>
+        {targets.map((t) => (
+          <button key={t.id} className="btn alt" disabled={busy || (p.animal === 'harimau' && t.pos < 2) || (p.animal === 'singa' && t.skip)} onClick={() => onUse({ target: t.id })}>
+            {face(t)} {t.name}
+          </button>
+        ))}
+      </>
+    );
+  }
+  return (
+    <div className="ut-skill">
+      <div className="ut-skill-h">
+        <span className="ut-face" aria-hidden="true">{face(p)}</span><b>{sk.name}</b>
+        <span className={'ut-chip' + (ready ? ' on' : '')}>{ready ? (sk.when === 'passive' ? 'aktif otomatis' : 'siap') : 'terpakai'}</span>
+      </div>
+      <p className="hint">{sk.desc}</p>
+      {body && <div className="ut-sk-actions">{body}</div>}
+    </div>
   );
 }
 
@@ -207,6 +296,8 @@ export default function Page() {
   const [rolling, setRolling] = useState(false);
   const [copied, setCopied] = useState(false);
   const [party, setParty] = useState(null);
+  const [reveal, setReveal] = useState(false); // pembagian hewan & skill
+  const [recharge, setRecharge] = useState(0); // 0 = skill 1× per permainan, 1-10 = pulih setelah N jawaban benar beruntun
   const partySeen = useRef(null);
   const ver = useRef(-1);
 
@@ -229,12 +320,13 @@ export default function Page() {
       fetch('/api/ut', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify({ action: 'leave', id: me.id, tok: me.tok }) }).catch(() => {});
     }
-    setRoom(null); setMe(null); setResume(null); setErr(msg); localStorage.removeItem('ut-last');
+    setRoom(null); setMe(null); setResume(null); setReveal(false); setErr(msg); localStorage.removeItem('ut-last');
   };
 
   useEffect(() => {
     setName(localStorage.getItem('kuis-name') || '');
     const l = localStorage.getItem('kuis-level'); if (LNAME[l]) setLevel(l);
+    const rc = Number(localStorage.getItem('kuis-recharge')); if (Number.isInteger(rc) && rc >= 0 && rc <= 10) setRecharge(rc);
     const q = new URLSearchParams(location.search).get('room'); if (q) setJoinId(q.toUpperCase());
     try {
       const last = JSON.parse(localStorage.getItem('ut-last') || 'null');
@@ -271,6 +363,7 @@ export default function Page() {
     if (n <= partySeen.current) return;
     partySeen.current = n;
     const l = room.last;
+    if (l?.type === 'start' || (l?.type === 'again' && room.mode === 'local')) { setReveal(true); return; } // hewan baru dibagikan
     if (l?.type !== 'roll' || !l.finished) return;
     const title = room.players[l.who].name;
     const sub = l.finished === 1 ? 'finis pertama, juara 1!' : `finis di peringkat ${l.finished}!`;
@@ -278,18 +371,19 @@ export default function Page() {
   }, [room]);
 
   const needName = () => { if (!name.trim()) { setErr('Isi nama dulu.'); return true; } localStorage.setItem('kuis-name', name.trim()); localStorage.setItem('kuis-level', level); return false; };
-  const createOnline = () => { if (!needName()) run(async () => enter(await api({ action: 'create', mode: 'online', name, level, animal: localStorage.getItem('kuis-animal') }))); };
+  const createOnline = () => { if (!needName()) run(async () => enter(await api({ action: 'create', mode: 'online', name, level, recharge }))); };
   const joinRoom = () => {
     if (needName()) return;
     if (!joinId.trim()) { setErr('Isi ID room.'); return; }
-    run(async () => enter(await api({ action: 'join', id: joinId, name, animal: localStorage.getItem('kuis-animal') })));
+    run(async () => enter(await api({ action: 'join', id: joinId, name })));
   };
-  const createLocal = () => { localStorage.setItem('kuis-level', level); run(async () => enter(await api({ action: 'create', mode: 'local', names: locals, level }))); };
+  const createLocal = () => { localStorage.setItem('kuis-level', level); run(async () => { enter(await api({ action: 'create', mode: 'local', names: locals, level, recharge })); setReveal(true); }); };
+  const changeRecharge = (v) => { setRecharge(v); localStorage.setItem('kuis-recharge', String(v)); };
   const setCount = (n) => setLocals((a) => Array.from({ length: n }, (_, i) => a[i] ?? `Pemain ${i + 1}`));
-  const act = (type, extra = {}) => run(async () => {
-    if (type === 'roll') {
+  const act = (type, extra = {}, anim = false) => run(async () => {
+    if (type === 'roll' || anim) {
       setRolling(true);
-      const [d] = await Promise.all([api({ action: type, id: me.id, tok: me.tok }), wait(800)]);
+      const [d] = await Promise.all([api({ action: type, id: me.id, tok: me.tok, ...extra }), wait(800)]);
       apply(d.room);
     } else {
       const d = await api({ action: type, id: me.id, tok: me.tok, ...extra });
@@ -300,7 +394,7 @@ export default function Page() {
       apply(d.room);
     }
   }).finally(() => setRolling(false));
-  const pickAnimal = (k) => { localStorage.setItem('kuis-animal', k); act('pick', { animal: k }); };
+  const useSkill = (extra) => act('skill', extra, ROLL_SKILLS.includes(room.players[room.turn]?.animal));
   const copy = async () => {
     try { await navigator.clipboard.writeText(`${location.origin}/?room=${room.id}`); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
   };
@@ -331,6 +425,8 @@ export default function Page() {
                 </button>
               ))}
             </div>
+            <label style={{ marginTop: 14 }}>Pemulihan skill</label>
+            <SkillRule value={recharge} onChange={changeRecharge} />
           </div>
           <div className="card">
             <h2>Main online</h2>
@@ -372,7 +468,7 @@ export default function Page() {
   const spec = me.pid == null; // penonton
   const winner = room.winner != null ? room.players[room.winner] : null;
   const last = room.last;
-  const tone = !last ? '' : last.type === 'wrong' || last.kind === 'snake' || last.kind === 'reset' ? ' bad' : last.type === 'correct' || last.kind === 'ladder' || last.bonus ? ' good' : '';
+  const tone = !last ? '' : last.type === 'wrong' || last.kind === 'snake' || last.kind === 'reset' ? ' bad' : last.type === 'correct' || last.type === 'skill' || last.kind === 'ladder' || last.kind === 'shield' || last.bonus ? ' good' : '';
 
   return (
     <main>
@@ -394,27 +490,19 @@ export default function Page() {
           {spec ? (
             <>
               <p className="hint">Kamu sedang menonton. Kalau masih ada tempat, kamu bisa ikut bermain.</p>
-              <button className="btn" onClick={() => act('sit', { animal: localStorage.getItem('kuis-animal') })} disabled={busy || activeCount >= 6}>
+              <button className="btn" onClick={() => act('sit')} disabled={busy || activeCount >= 6}>
                 {activeCount >= 6 ? 'Room penuh (maksimal 6 pemain)' : 'Gabung sebagai pemain'}
               </button>
             </>
           ) : (
             <>
-              <h2 style={{ marginTop: 18 }}>Pilih karakter hewanmu</h2>
-              <div className="ut-animals" role="radiogroup" aria-label="Pilih karakter hewan">
-                {ANIMALS.map(([k, e, n]) => {
-                  const owner = room.players.find((p) => !p.left && p.animal === k);
-                  const mineSel = owner?.id === me.pid;
-                  const taken = !!owner && !mineSel;
-                  return (
-                    <button key={k} role="radio" aria-checked={mineSel} className={'ut-an' + (mineSel ? ' on' : '')}
-                      disabled={taken || busy} title={taken ? `Dipakai ${owner.name}` : n} onClick={() => pickAnimal(k)}>
-                      <span className="ut-an-e">{e}</span>
-                      <small>{taken ? owner.name : n}</small>
-                    </button>
-                  );
-                })}
-              </div>
+              <h2 style={{ marginTop: 18 }}>Pemulihan skill</h2>
+              {me.pid === room.host
+                ? <SkillRule value={room.recharge} onChange={(v) => act('rule', { recharge: v })} disabled={busy} />
+                : <p className="mute">{ruleText(room.recharge)}</p>}
+              <h2 style={{ marginTop: 18 }}>Hewan dibagikan acak</h2>
+              <p className="mute">Saat permainan dimulai, tiap pemain mendapat hewan berbeda secara acak, lengkap dengan skill-nya. Semua skill terbuka untuk semua pemain.</p>
+              <AnimalGuide />
               {me.pid === room.host
                 ? <button className="btn" onClick={() => act('start')} disabled={busy || activeCount < 2}>
                     {activeCount < 2 ? 'Menunggu pemain lain...' : `Mulai permainan (${activeCount} pemain)`}
@@ -464,6 +552,8 @@ export default function Page() {
                 </div>
               )}
 
+              {room.status === 'playing' && mine && <SkillPanel room={room} busy={busy} onUse={useSkill} />}
+
               {room.status === 'finished' && (
                 <>
                   <h2 style={{ marginTop: 14 }}>Peringkat akhir</h2>
@@ -494,11 +584,34 @@ export default function Page() {
               <h2>Pemain</h2>
               <PlayerList room={room} />
               <Spectators room={room} />
+              <p className="hint">{ruleText(room.recharge)}</p>
             </div>
             <div className="card">
               <h2>Riwayat</h2>
               <ul className="ut-log">{room.log.map((t, i) => <li key={i}>{t}</li>)}</ul>
             </div>
+          </div>
+        </div>
+      )}
+
+      {reveal && room.status === 'playing' && (
+        <div className="ut-reveal" role="dialog" aria-modal="true" aria-label="Pembagian hewan dan skill">
+          <div className="ut-reveal-box">
+            <h2>Hewan dan skill kalian</h2>
+            <ul>
+              {room.players.filter((p) => !p.left && p.animal).map((p) => (
+                <li key={p.id} className={room.mode === 'online' && me.pid === p.id ? 'me' : ''}>
+                  <span className="ut-face big" aria-hidden="true">{face(p)}</span>
+                  <div>
+                    <b>{p.name}{room.mode === 'online' && me.pid === p.id ? ' (kamu)' : ''}</b>
+                    <small>{AMAP[p.animal]?.n} · {SKILLS[p.animal]?.name}</small>
+                    <small>{SKILLS[p.animal]?.desc}</small>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <p className="hint">{ruleText(room.recharge)}</p>
+            <button className="btn" onClick={() => setReveal(false)}>Mulai bermain</button>
           </div>
         </div>
       )}

@@ -1,5 +1,5 @@
 import { sql } from '../../../lib/db';
-import { SNAKES, LADDERS, ANIMALS } from '../../../lib/utboard';
+import { SNAKES, LADDERS, ANIMALS, SKILLS } from '../../../lib/utboard';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,12 +10,8 @@ const newTok = () => crypto.randomUUID().replace(/-/g, '');
 const clean = (v) => String(v || '').trim().replace(/\s+/g, ' ').slice(0, 16);
 const shuffle = (a) => { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const AIDS = ANIMALS.map((a) => a[0]);
-// Pilih hewan: pakai pilihan yang diminta kalau valid dan belum dipakai pemain lain, kalau tidak ambil yang masih kosong
-const freeAnimal = (s, pref, exceptId = -1) => {
-  const used = new Set(s.players.filter((p) => !p.left && p.id !== exceptId).map((p) => p.animal));
-  if (AIDS.includes(pref) && !used.has(pref)) return pref;
-  return AIDS.find((a) => !used.has(a)) ?? AIDS[0];
-};
+const ICON = Object.fromEntries(ANIMALS.map((a) => [a[0], a[1]]));
+const die = () => 1 + Math.floor(Math.random() * 6);
 const say = (s, t) => { s.log = [t, ...(s.log || [])].slice(0, 6); };
 
 class E extends Error { constructor(m, status = 400) { super(m); this.status = status; } }
@@ -41,6 +37,11 @@ const STOP_AT = 2;
 const MAX_SIXES = 3;
 const RESET_TO = 1;
 const active = (s) => s.players.filter((p) => !p.left);
+// Bagikan hewan acak: tiap pemain mendapat hewan berbeda (9 hewan, maksimal 6 pemain) beserta skill-nya yang masih utuh
+function dealAnimals(s) {
+  const pool = shuffle(AIDS);
+  active(s).forEach((p, i) => { p.animal = pool[i]; p.spent = false; p.streak = 0; p.skip = false; p.sixes = 0; });
+}
 const racing = (s) => s.players.filter((p) => !p.left && !p.done);
 
 // Cek apakah permainan harus berakhir. Kalau ya, susun peringkat akhir.
@@ -63,9 +64,9 @@ const pub = (row, s) => ({
   id: row.id, level: row.level, mode: row.mode, version: row.version,
   status: s.status, host: s.host, turn: s.turn, phase: s.phase, q: s.q, last: s.last,
   dice: s.dice, move: s.move ?? null, log: s.log, winner: s.winner,
-  players: s.players.map(({ id, name, pos, color, animal, left, done, rank }) => ({ id, name, pos, color, animal: animal ?? AIDS[color % AIDS.length], left: !!left, done: !!done, rank: rank ?? null })),
+  players: s.players.map(({ id, name, pos, color, animal, spent, streak, skip, left, done, rank }) => ({ id, name, pos, color, animal: animal ?? null, spent: !!spent, streak: streak ?? 0, skip: !!skip, left: !!left, done: !!done, rank: rank ?? null })),
   ranking: s.ranking ?? [],
-  round: s.round ?? 0,
+  round: s.round ?? 0, recharge: s.recharge ?? 0,
   spectators: (s.spectators ?? []).map(({ id, name }) => ({ id, name })),
 });
 
@@ -85,9 +86,13 @@ async function pickQ(level, used) {
 
 async function nextTurn(s, level) {
   const n = s.players.length;
-  for (let i = 1; i <= n; i++) {
+  // Dua putaran: pemain yang kena Auman dilewati sekali (bendera dihapus), lalu giliran dicari lagi
+  for (let i = 1; i <= 2 * n; i++) {
     const t = (s.turn + i) % n;
-    if (!s.players[t].left && !s.players[t].done) { s.turn = t; break; }
+    const c = s.players[t];
+    if (c.left || c.done) continue;
+    if (c.skip) { c.skip = false; say(s, `${c.name} melewatkan giliran karena auman Singa.`); continue; }
+    s.turn = t; break;
   }
   s.phase = 'answer';
   s.q = await pickQ(level, s.used);
@@ -160,9 +165,10 @@ async function create(b) {
   const s = {
     status: mode === 'local' ? 'playing' : 'lobby', host: 0, turn: 0, phase: 'answer', q: null, last: null, dice: null,
     log: [], winner: null, used: [], n: 0,
-    players: names.map((name, i) => ({ id: i, name, pos: 0, color: i, animal: mode === 'online' && AIDS.includes(b.animal) ? b.animal : AIDS[i], tok: i === 0 ? tok : null })),
+    recharge: Number.isInteger(b.recharge) && b.recharge >= 0 && b.recharge <= 10 ? b.recharge : 0, // 0 = skill 1x per permainan
+    players: names.map((name, i) => ({ id: i, name, pos: 0, color: i, animal: null, tok: i === 0 ? tok : null })),
   };
-  if (mode === 'local') { s.q = await pickQ(level, s.used); say(s, `Permainan dimulai. Giliran ${names[0]}.`); }
+  if (mode === 'local') { dealAnimals(s); s.q = await pickQ(level, s.used); say(s, `Permainan dimulai. Giliran ${names[0]}.`); }
   await sql`delete from ut_rooms where updated_at < now() - interval '1 day'`;
   for (let t = 0; t < 6; t++) {
     const id = rid(5);
@@ -188,7 +194,7 @@ async function join(b) {
       pid = s.players.length;
       const used = new Set(active(s).map((p) => p.color));
       let color = 0; while (used.has(color)) color++;
-      s.players.push({ id: pid, name, pos: 0, color, animal: freeAnimal(s, b.animal), tok });
+      s.players.push({ id: pid, name, pos: 0, color, animal: null, tok });
       say(s, `${name} bergabung.`);
       return;
     }
@@ -202,6 +208,65 @@ async function join(b) {
   return { id, tok, pid, sid, room: pub({ ...row, version }, s) };
 }
 
+// Tujuan bidak untuk `steps` langkah dari `pos` (memantul di 100, lalu tangga/ular)
+const landing = (pos, steps) => {
+  let to = pos + steps;
+  if (to > 100) to = 200 - to;
+  let end = to, kind = null;
+  if (LADDERS[to]) { end = LADDERS[to]; kind = 'ladder'; }
+  else if (SNAKES[to]) { end = SNAKES[to]; kind = 'snake'; }
+  return { to, end, kind };
+};
+
+// Satu lemparan dadu. d = angka dadu, o.plus = tambahan langkah, o.how = cara mengocok (untuk teks)
+async function resolveRoll(s, row, p, d, o = {}) {
+  const steps = d + (o.plus || 0);
+  const from = p.pos;
+  p.sixes = d === 6 ? (p.sixes || 0) + 1 : 0;
+  s.n++;
+  s.dice = { n: s.n, who: p.id, v: d };
+  // Tiga kali 6 berturut-turut: bidak tidak berjalan, kembali ke kotak RESET_TO, giliran pindah
+  if (p.sixes >= MAX_SIXES) {
+    p.sixes = 0;
+    p.pos = RESET_TO;
+    s.move = { n: s.n, who: p.id, dice: d, from, to: from, end: RESET_TO, kind: 'reset' };
+    await nextTurn(s, row.level);
+    const text = `${p.name} mendapat angka 6 sebanyak ${MAX_SIXES} kali berturut-turut, bidak kembali ke kotak ${RESET_TO}! Giliran ${s.players[s.turn].name}.`;
+    s.last = { n: s.n, type: 'roll', who: p.id, dice: d, kind: 'reset', finished: null, over: false, bonus: false, text };
+    say(s, text);
+    return;
+  }
+  let { to, end, kind } = landing(p.pos, steps);
+  let shield = false;
+  if (kind === 'snake' && p.animal === 'panda' && !p.spent) { // Kulit Tebal: kebal satu gigitan ular
+    p.spent = true; p.streak = 0; shield = true; end = to; kind = null;
+  }
+  p.pos = end;
+  s.move = { n: s.n, who: p.id, dice: steps, from, to, end, kind };
+  let text = `${p.name} ${o.how || `mengocok ${d}`} dan sampai di kotak ${to}`;
+  text += kind === 'ladder' ? `, naik tangga ke ${end}!` : kind === 'snake' ? `, dimakan ular dan turun ke ${end}.`
+    : shield ? `, tetapi Kulit Tebal menahan gigitan ular! Tetap di kotak ${to}.` : '.';
+  let finished = null, over = false, bonus = false;
+  if (p.pos === 100) {
+    p.sixes = 0;
+    p.done = true;
+    p.rank = s.finishOrder.length + 1;
+    s.finishOrder.push(p.id);
+    finished = p.rank;
+    text += ` ${p.name} finis di peringkat ${p.rank}!`;
+    if (settle(s)) { over = true; text += ' Permainan selesai.'; }
+    else { await nextTurn(s, row.level); text += ` Permainan berlanjut. Giliran ${s.players[s.turn].name}.`; }
+  } else if (d === 6) {
+    bonus = true; // giliran tetap di pemain ini, langsung kocok lagi (tanpa soal baru)
+    text += ` Dapat angka 6 (${p.sixes}/${MAX_SIXES} berturut-turut), ${p.name} kocok dadu lagi!`;
+  } else {
+    await nextTurn(s, row.level);
+    text += ` Giliran ${s.players[s.turn].name}.`;
+  }
+  s.last = { n: s.n, type: 'roll', who: p.id, dice: d, kind: shield ? 'shield' : kind, finished, over, bonus, text };
+  say(s, text);
+}
+
 async function act(b) {
   await ensure();
   const id = String(b.id || '').trim().toUpperCase();
@@ -213,20 +278,22 @@ async function act(b) {
       if (!tok || host.tok !== tok) throw new E('Hanya host yang bisa memulai.', 403);
       if (active(s).length < 2) throw new E('Minimal 2 pemain untuk mulai.');
       s.status = 'playing'; s.turn = s.players.findIndex((p) => !p.left); s.phase = 'answer';
+      dealAnimals(s);
       s.q = await pickQ(row.level, s.used);
       s.n++;
-      s.last = { n: s.n, type: 'start', text: `Permainan dimulai! Giliran ${s.players[s.turn].name}.` };
+      s.last = { n: s.n, type: 'start', text: `Permainan dimulai! Hewan dibagikan acak. Giliran ${s.players[s.turn].name}.` };
       say(s, s.last.text);
+      say(s, 'Hewan: ' + active(s).map((p) => `${p.name} ${ICON[p.animal]}`).join(', '));
       return;
     }
-    if (b.action === 'pick') {
-      if (row.mode !== 'online' || s.status !== 'lobby') throw new E('Hewan hanya bisa diganti di ruang tunggu.');
-      const me = tok ? s.players.find((x) => !x.left && x.tok === tok) : null;
-      if (!me) throw new E('Kamu tidak ada di room ini.', 403);
-      if (!AIDS.includes(b.animal)) throw new E('Hewan tidak dikenal.');
-      if (s.players.some((x) => !x.left && x.id !== me.id && x.animal === b.animal)) throw new E('Hewan itu sudah dipilih pemain lain.');
-      if (me.animal === b.animal) return 'noop';
-      me.animal = b.animal;
+    if (b.action === 'rule') { // host mengatur pemulihan skill: 0 = 1x per permainan, 1-10 = pulih setelah N jawaban benar beruntun
+      if (row.mode !== 'online' || s.status !== 'lobby') throw new E('Aturan skill hanya bisa diubah di ruang tunggu.');
+      if (!tok || host.tok !== tok) throw new E('Hanya host yang bisa mengubah aturan.', 403);
+      const n = b.recharge;
+      if (!Number.isInteger(n) || n < 0 || n > 10) throw new E('Angka pemulihan harus 0 sampai 10.');
+      if ((s.recharge ?? 0) === n) return 'noop';
+      s.recharge = n;
+      say(s, n ? `Aturan skill: pulih setelah ${n} jawaban benar beruntun.` : 'Aturan skill: dipakai 1× per permainan.');
       return;
     }
     if (b.action === 'sit') { // penonton -> pemain (hanya di ruang tunggu)
@@ -239,21 +306,22 @@ async function act(b) {
       const used = new Set(active(s).map((x) => x.color));
       let color = 0; while (used.has(color)) color++;
       s.spectators = s.spectators.filter((x) => x.id !== sp.id);
-      s.players.push({ id: pid, name: sp.name, pos: 0, color, animal: freeAnimal(s, b.animal), tok });
+      s.players.push({ id: pid, name: sp.name, pos: 0, color, animal: null, tok });
       say(s, `${sp.name} bergabung.`);
       return;
     }
     if (b.action === 'again') { // main lagi di room yang sama
       if (s.status !== 'finished') throw new E('Permainan belum selesai.');
       if (!tok || host.tok !== tok) throw new E('Hanya host yang bisa mengajak main lagi.', 403);
-      for (const x of s.players) if (!x.left) { x.pos = 0; x.done = false; x.rank = null; x.sixes = 0; }
+      for (const x of s.players) if (!x.left) { x.pos = 0; x.done = false; x.rank = null; x.sixes = 0; x.animal = null; x.spent = false; x.streak = 0; x.skip = false; }
       s.finishOrder = []; s.ranking = []; s.winner = null; s.dice = null; s.move = null; s.q = null;
       s.round = (s.round || 0) + 1;
       s.n++;
       if (row.mode === 'local') {
         s.status = 'playing'; s.turn = 0; s.phase = 'answer';
+        dealAnimals(s);
         s.q = await pickQ(row.level, s.used);
-        s.last = { n: s.n, type: 'again', text: `Ronde baru dimulai! Giliran ${s.players[0].name}.` };
+        s.last = { n: s.n, type: 'again', text: `Ronde baru dimulai! Hewan diacak ulang. Giliran ${s.players[0].name}.` };
       } else {
         s.status = 'lobby'; s.phase = 'answer';
         s.last = { n: s.n, type: 'again', text: 'Kembali ke ruang tunggu. Siap main lagi?' };
@@ -268,65 +336,104 @@ async function act(b) {
 
     if (b.action === 'answer') {
       if (s.phase !== 'answer') throw new E('Bukan saatnya menjawab.');
+      if (!s.q.options.includes(b.pick)) throw new E('Pilihan jawaban tidak valid.');
       const [r] = await sql`select answer from questions where id = ${s.q.id}`;
       s.n++;
       if (b.pick === r.answer) {
         s.phase = 'roll';
-        s.last = { n: s.n, type: 'correct', who: p.id, text: `${p.name} menjawab benar! Kocok dadu sekarang.` };
+        let text = `${p.name} menjawab benar! Kocok dadu sekarang.`;
+        // Skill yang sudah terpakai pulih setelah jawaban benar beruntun (kalau aturan room mengaktifkannya)
+        if (p.spent && (s.recharge || 0) > 0) {
+          p.streak = (p.streak || 0) + 1;
+          if (p.streak >= s.recharge) { p.spent = false; p.streak = 0; text += ` Skill ${SKILLS[p.animal]?.name ?? ''} pulih!`; }
+        }
+        s.last = { n: s.n, type: 'correct', who: p.id, text };
       } else {
-        s.last = { n: s.n, type: 'wrong', who: p.id, text: `${p.name} menjawab salah. Jawaban yang benar: ${r.answer}. Giliran dilewati.` };
-        await nextTurn(s, row.level);
+        p.streak = 0;
+        if (p.animal === 'kucing' && !p.spent) {
+          // Sembilan Nyawa: salah pertama dimaafkan, pilihan yang salah dihapus, boleh menjawab lagi
+          p.spent = true;
+          s.q.options = s.q.options.filter((o) => o !== b.pick);
+          s.last = { n: s.n, type: 'skill', who: p.id, text: `${p.name} menjawab salah, tetapi Sembilan Nyawa menyelamatkan! Coba jawab sekali lagi.` };
+        } else {
+          s.last = { n: s.n, type: 'wrong', who: p.id, text: `${p.name} menjawab salah. Jawaban yang benar: ${r.answer}. Giliran dilewati.` };
+          await nextTurn(s, row.level);
+        }
       }
       say(s, s.last.text);
       return;
     }
 
-    if (b.action === 'roll') {
-      if (s.phase !== 'roll') throw new E('Jawab soal dengan benar dulu sebelum mengocok dadu.');
-      const d = 1 + Math.floor(Math.random() * 6);
-      const from = p.pos;
-      p.sixes = d === 6 ? (p.sixes || 0) + 1 : 0;
-      s.n++;
-      s.dice = { n: s.n, who: p.id, v: d };
-      // Tiga kali 6 berturut-turut: bidak tidak berjalan, kembali ke kotak RESET_TO, giliran pindah
-      if (p.sixes >= MAX_SIXES) {
-        p.sixes = 0;
-        p.pos = RESET_TO;
-        s.move = { n: s.n, who: p.id, dice: d, from, to: from, end: RESET_TO, kind: 'reset' };
-        await nextTurn(s, row.level);
-        const text = `${p.name} mendapat angka 6 sebanyak ${MAX_SIXES} kali berturut-turut, bidak kembali ke kotak ${RESET_TO}! Giliran ${s.players[s.turn].name}.`;
-        s.last = { n: s.n, type: 'roll', who: p.id, dice: d, kind: 'reset', finished: null, over: false, bonus: false, text };
-        say(s, text);
+    if (b.action === 'skill') {
+      const sk = SKILLS[p.animal];
+      if (!sk) throw new E('Kamu belum punya skill.');
+      if (sk.when === 'passive') throw new E('Skill ini aktif otomatis, tidak perlu ditekan.');
+      if (p.spent) throw new E('Skill sedang tidak bisa dipakai.');
+      const use = () => { p.spent = true; p.streak = 0; };
+      const note = (text) => { s.n++; s.last = { n: s.n, type: 'skill', who: p.id, text }; say(s, text); };
+      const needPhase = (ph, msg) => { if (s.phase !== ph) throw new E(msg); };
+
+      if (p.animal === 'rubah') {
+        needPhase('answer', 'Akal Bulus dipakai saat menjawab soal.');
+        if (s.q.options.length <= 2) throw new E('Pilihan jawaban sudah tinggal dua.');
+        const [r] = await sql`select answer from questions where id = ${s.q.id}`;
+        const gone = shuffle(s.q.options.filter((o) => o !== r.answer)).slice(0, Math.min(2, s.q.options.length - 2));
+        s.q.options = s.q.options.filter((o) => !gone.includes(o));
+        use(); note(`${p.name} memakai Akal Bulus: ${gone.length} pilihan yang salah dihapus!`);
         return;
       }
-      let to = p.pos + d;
-      if (to > 100) to = 200 - to; // melewati 100: memantul balik
-      let end = to, kind = null;
-      if (LADDERS[to]) { end = LADDERS[to]; kind = 'ladder'; }
-      else if (SNAKES[to]) { end = SNAKES[to]; kind = 'snake'; }
-      p.pos = end;
-      s.move = { n: s.n, who: p.id, dice: d, from, to, end, kind };
-      let text = `${p.name} mengocok ${d} dan sampai di kotak ${to}`;
-      text += kind === 'ladder' ? `, naik tangga ke ${end}!` : kind === 'snake' ? `, dimakan ular dan turun ke ${end}.` : '.';
-      let finished = null, over = false, bonus = false;
-      if (p.pos === 100) {
-        p.sixes = 0;
-        p.done = true;
-        p.rank = s.finishOrder.length + 1;
-        s.finishOrder.push(p.id);
-        finished = p.rank;
-        text += ` ${p.name} finis di peringkat ${p.rank}!`;
-        if (settle(s)) { over = true; text += ' Permainan selesai.'; }
-        else { await nextTurn(s, row.level); text += ` Permainan berlanjut. Giliran ${s.players[s.turn].name}.`; }
-      } else if (d === 6) {
-        bonus = true; // giliran tetap di pemain ini, langsung kocok lagi (tanpa soal baru)
-        text += ` Dapat angka 6 (${p.sixes}/${MAX_SIXES} berturut-turut), ${p.name} kocok dadu lagi!`;
-      } else {
-        await nextTurn(s, row.level);
-        text += ` Giliran ${s.players[s.turn].name}.`;
+      if (p.animal === 'monyet') {
+        needPhase('answer', 'Tukar Soal dipakai saat menjawab soal.');
+        s.q = await pickQ(row.level, s.used);
+        use(); note(`${p.name} memakai Tukar Soal: soal diganti!`);
+        return;
       }
-      s.last = { n: s.n, type: 'roll', who: p.id, dice: d, kind, finished, over, bonus, text };
-      say(s, text);
+      if (p.animal === 'kelinci') {
+        needPhase('roll', 'Dadu Ganda dipakai saat mengocok dadu.');
+        const a = die(), c = die();
+        // Nilai hasil tiap dadu (memperhitungkan tangga, ular, dan aturan tiga kali 6)
+        const val = (d) => (d === 6 && (p.sixes || 0) + 1 >= MAX_SIXES ? RESET_TO : landing(p.pos, d).end);
+        const pick = val(a) > val(c) || (val(a) === val(c) && a >= c) ? a : c;
+        use();
+        await resolveRoll(s, row, p, pick, { how: `memakai Dadu Ganda (dadu ${a} & ${c}, dipilih ${pick})` });
+        return;
+      }
+      if (p.animal === 'katak') {
+        needPhase('roll', 'Lompat Jauh dipakai saat mengocok dadu.');
+        const d = die();
+        use();
+        await resolveRoll(s, row, p, d, { plus: 3, how: `memakai Lompat Jauh (dadu ${d} +3 = ${d + 3} langkah)` });
+        return;
+      }
+      if (p.animal === 'penguin') {
+        needPhase('roll', 'Seluncur Es dipakai saat mengocok dadu.');
+        const v = b.value;
+        if (!Number.isInteger(v) || v < 1 || v > 5) throw new E('Pilih angka dadu 1 sampai 5.');
+        use();
+        await resolveRoll(s, row, p, v, { how: `memilih angka ${v} lewat Seluncur Es` });
+        return;
+      }
+      // singa & harimau: memilih lawan
+      if (s.phase !== 'answer' && s.phase !== 'roll') throw new E('Skill belum bisa dipakai sekarang.');
+      const t = Number.isInteger(b.target) ? s.players[b.target] : null;
+      if (!t || t.left || t.done || t.id === p.id) throw new E('Pilih lawan yang masih bermain.');
+      if (p.animal === 'singa') {
+        if (t.skip) throw new E(`${t.name} sudah akan melewatkan giliran.`);
+        t.skip = true;
+        use(); note(`${p.name} mengaum! ${t.name} akan melewatkan giliran berikutnya.`);
+      } else {
+        if (t.pos < 2) throw new E(`${t.name} belum bisa dimundurkan.`);
+        const from = t.pos;
+        t.pos = Math.max(1, t.pos - 4);
+        use(); note(`${p.name} menerkam ${t.name}! Mundur dari kotak ${from} ke kotak ${t.pos}.`);
+        s.move = { n: s.n, who: t.id, dice: 0, from, to: from, end: t.pos, kind: 'push' };
+      }
+      return;
+    }
+
+    if (b.action === 'roll') {
+      if (s.phase !== 'roll') throw new E('Jawab soal dengan benar dulu sebelum mengocok dadu.');
+      await resolveRoll(s, row, p, die());
       return;
     }
     throw new E('Aksi tidak dikenal.');
@@ -408,7 +515,7 @@ export async function POST(req) {
     if (b.action === 'create') return Response.json(await create(b));
     if (b.action === 'join') return Response.json(await join(b));
     if (b.action === 'leave') return Response.json(await leave(b));
-    if (['start', 'pick', 'sit', 'again', 'answer', 'roll'].includes(b.action)) return Response.json(await act(b));
+    if (['start', 'rule', 'sit', 'again', 'answer', 'skill', 'roll'].includes(b.action)) return Response.json(await act(b));
     throw new E('Aksi tidak dikenal.');
   } catch (e) { return fail(e); }
 }
