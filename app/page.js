@@ -32,7 +32,15 @@ const skillLine = (p, recharge) => {
       : "terpakai";
   return `${sk.name} · ${st}${p.skip ? " · akan dilewati" : ""}`;
 };
-const SC = ["#EF4444", "#16A34A", "#8B5CF6", "#F59E0B"];
+const SC = ["#ef4444", "#22a559", "#8b5cf6", "#f59e0b", "#0ea5e9", "#ec4899"]; // warna ular
+const LVL_ICO = { mudah: "🌱", sedang: "📘", sulit: "🔥", olimpiade: "🏆" };
+const MAP_ICO = {
+  klasik: "🎲",
+  rawa: "🐸",
+  gunung: "🌋",
+  es: "🧊",
+  portal: "🌀",
+};
 const PIPS = {
   1: [4],
   2: [0, 8],
@@ -90,61 +98,110 @@ function Ladder({ a, b }) {
   const dx = x2 - x1,
     dy = y2 - y1,
     L = Math.hypot(dx, dy);
-  const nx = (-dy / L) * 1.5,
-    ny = (dx / L) * 1.5,
-    steps = Math.max(2, Math.floor(L / 5));
-  return (
-    <g stroke="#B9772B" strokeLinecap="round">
+  const nx = (-dy / L) * 1.7,
+    ny = (dx / L) * 1.7,
+    steps = Math.max(2, Math.floor(L / 4.4));
+  const rungs = Array.from({ length: steps - 1 }, (_, i) => {
+    const t = (i + 1) / steps;
+    return [x1 + dx * t, y1 + dy * t];
+  });
+  // satu lapisan tangga (bayangan, kayu, kilau) supaya terlihat bervolume
+  const layer = (key, stroke, rail, rung, ox = 0, oy = 0) => (
+    <g key={key} stroke={stroke} transform={`translate(${ox} ${oy})`}>
       <line
         x1={x1 + nx}
         y1={y1 + ny}
         x2={x2 + nx}
         y2={y2 + ny}
-        strokeWidth="0.9"
+        strokeWidth={rail}
       />
       <line
         x1={x1 - nx}
         y1={y1 - ny}
         x2={x2 - nx}
         y2={y2 - ny}
-        strokeWidth="0.9"
+        strokeWidth={rail}
       />
-      {Array.from({ length: steps - 1 }, (_, i) => {
-        const t = (i + 1) / steps;
-        return (
-          <line
-            key={i}
-            x1={x1 + dx * t + nx}
-            y1={y1 + dy * t + ny}
-            x2={x1 + dx * t - nx}
-            y2={y1 + dy * t - ny}
-            strokeWidth="0.6"
-          />
-        );
-      })}
+      {rungs.map(([x, y], i) => (
+        <line
+          key={i}
+          x1={x + nx}
+          y1={y + ny}
+          x2={x - nx}
+          y2={y - ny}
+          strokeWidth={rung}
+        />
+      ))}
+    </g>
+  );
+  return (
+    <g strokeLinecap="round">
+      {layer("s", "rgba(60,30,0,.25)", 1.5, 1, 0.45, 0.7)}
+      {layer("w", "#9a5b22", 1.3, 0.85)}
+      {layer("h", "#e6ad63", 0.5, 0.3)}
     </g>
   );
 }
 
 function Snake({ a, b, color }) {
   const pts = snakePts(a, b, 40);
-  const [x1, y1] = pts[0];
+  const n = pts.length;
+  const w = (i) => 2.3 - 1.2 * (i / (n - 1)); // kepala tebal, ekor ramping
+  const f = (v) => v.toFixed(2);
+  const [x0, y0] = pts[0],
+    [x1, y1] = pts[1];
+  const deg = (Math.atan2(y0 - y1, x0 - x1) * 180) / Math.PI; // kepala menghadap menjauh dari badan
+  const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${f(x)} ${f(y)}`).join("");
+  const segs = pts.slice(0, -1);
   return (
-    <g>
-      <polyline
-        points={pts
-          .map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`)
-          .join(" ")}
-        fill="none"
-        stroke={color}
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity=".9"
+    <g strokeLinecap="round" strokeLinejoin="round" fill="none">
+      {segs.map(([x, y], i) => (
+        <line
+          key={"o" + i}
+          x1={f(x)}
+          y1={f(y)}
+          x2={f(pts[i + 1][0])}
+          y2={f(pts[i + 1][1])}
+          stroke="rgba(20,12,50,.5)"
+          strokeWidth={w(i) + 0.7}
+        />
+      ))}
+      {segs.map(([x, y], i) => (
+        <line
+          key={"b" + i}
+          x1={f(x)}
+          y1={f(y)}
+          x2={f(pts[i + 1][0])}
+          y2={f(pts[i + 1][1])}
+          stroke={color}
+          strokeWidth={w(i)}
+        />
+      ))}
+      <path
+        d={d}
+        stroke="rgba(255,255,255,.4)"
+        strokeWidth=".55"
+        strokeDasharray="0.01 1.7"
       />
-      <circle cx={x1} cy={y1} r="2.2" fill={color} />
-      <circle cx={x1 - 0.7} cy={y1 - 0.5} r=".5" fill="#fff" />
-      <circle cx={x1 + 0.7} cy={y1 - 0.5} r=".5" fill="#fff" />
+      <g transform={`translate(${f(x0)} ${f(y0)}) rotate(${f(deg)})`}>
+        <path
+          d="M2.4 0H4.3M4.3 0l.8-.6M4.3 0l.8.6"
+          stroke="#e11d48"
+          strokeWidth=".3"
+        />
+        <ellipse
+          cx=".2"
+          rx="2.7"
+          ry="2.2"
+          fill={color}
+          stroke="rgba(20,12,50,.5)"
+          strokeWidth=".35"
+        />
+        <circle cx=".9" cy="-1" r=".72" fill="#fff" />
+        <circle cx=".9" cy="1" r=".72" fill="#fff" />
+        <circle cx="1.1" cy="-1" r=".33" fill="#111" />
+        <circle cx="1.1" cy="1" r=".33" fill="#111" />
+      </g>
     </g>
   );
 }
@@ -157,11 +214,20 @@ function Pin({ color, label, fx }) {
         d="M15 39C15 39 2.5 24.5 2.5 14.5a12.5 12.5 0 0 1 25 0C27.5 24.5 15 39 15 39z"
         fill={color}
         stroke="#fff"
-        strokeWidth="2.2"
+        strokeWidth="2.4"
         strokeLinejoin="round"
       />
-      <circle cx="15" cy="14.5" r="9.4" fill="#fff" />
-      <text x="15" y="19.2" textAnchor="middle" fontSize="13">
+      <circle cx="15" cy="14.5" r="9.6" fill="#fff" />
+      <circle
+        cx="15"
+        cy="14.5"
+        r="9.6"
+        fill="none"
+        stroke={color}
+        strokeOpacity=".28"
+        strokeWidth="1.2"
+      />
+      <text x="15" y="19.4" textAnchor="middle" fontSize="13">
         {label}
       </text>
     </svg>
@@ -345,6 +411,7 @@ function Board({ players, move, turn, playing, map }) {
             "ut-cell " +
             ((r + c) % 2 ? "a" : "b") +
             (n === 100 ? " end" : "") +
+            (n === 1 ? " start" : "") +
             (t ? " " + t : "")
           }
           data-pl={mp.portalLabels?.[n]}
@@ -379,7 +446,11 @@ function Board({ players, move, turn, playing, map }) {
         return (
           <div
             key={p.id}
-            className={"ut-pawn" + (s.fx ? " go" : "")}
+            className={
+              "ut-pawn" +
+              (s.fx ? " go" : "") +
+              (playing && turn === p.id ? " turn" : "")
+            }
             title={p.name}
             style={{
               left: s.x + "%",
@@ -412,8 +483,10 @@ function PlayerList({ room }) {
             <span className="ut-face" aria-hidden="true">
               {face(p)}
             </span>
-            {p.name}
-            {p.id === room.host && room.mode === "online" ? " (host)" : ""}
+            <span className="ut-pname">
+              {p.name}
+              {p.id === room.host && room.mode === "online" ? " (host)" : ""}
+            </span>
             <small>
               {room.status === "lobby"
                 ? ""
@@ -425,6 +498,16 @@ function PlayerList({ room }) {
                       ? `Kotak ${p.pos}`
                       : "Start"}
             </small>
+            {room.status !== "lobby" && (
+              <div className="ut-bar" aria-hidden="true">
+                <i
+                  style={{
+                    width: Math.min(100, p.pos || 0) + "%",
+                    background: COLORS[p.color],
+                  }}
+                />
+              </div>
+            )}
             {room.status !== "lobby" && p.animal && SKILLS[p.animal] && (
               <span className="ut-sk">{skillLine(p, room.recharge)}</span>
             )}
@@ -447,6 +530,7 @@ function SkillRule({ value, onChange, disabled }) {
           disabled={disabled}
           onClick={() => onChange(0)}
         >
+          <span className="ico">🎯</span>
           <b>1× per permainan</b>
           <small>Skill hanya dipakai sekali</small>
         </button>
@@ -457,6 +541,7 @@ function SkillRule({ value, onChange, disabled }) {
           disabled={disabled}
           onClick={() => onChange(value || 3)}
         >
+          <span className="ico">🔄</span>
           <b>Pulih lewat kuis</b>
           <small>Aktif lagi setelah jawab benar beruntun</small>
         </button>
@@ -497,6 +582,7 @@ function MapPick({ value, onChange, disabled }) {
           disabled={disabled}
           onClick={() => onChange(k)}
         >
+          <span className="ico">{MAP_ICO[k] ?? "🗺️"}</span>
           <b>{m.name}</b>
           <small>{m.desc}</small>
         </button>
@@ -505,19 +591,32 @@ function MapPick({ value, onChange, disabled }) {
   );
 }
 
-// Keterangan kotak spesial milik map yang sedang dipakai
+// Legenda papan: tangga, ular, dan kotak spesial milik map yang sedang dipakai
 function TileLegend({ map }) {
   const kinds = [...new Set(Object.values(getMap(map).tiles))];
-  if (!kinds.length) return null;
   return (
-    <p className="hint">
-      {kinds.map((k) => (
-        <span key={k} style={{ marginRight: 12 }}>
-          <i className={"ut-key " + k} /> {TILE_INFO[k].name}:{" "}
-          {TILE_INFO[k].desc}
+    <ul className="ut-legend">
+      <li>
+        <i className="ut-key ladder" />
+        <span>
+          <b>Tangga</b> naik
         </span>
+      </li>
+      <li>
+        <i className="ut-key snake" />
+        <span>
+          <b>Ular</b> turun
+        </span>
+      </li>
+      {kinds.map((k) => (
+        <li key={k}>
+          <i className={"ut-key " + k} />
+          <span>
+            <b>{TILE_INFO[k].name}</b> {TILE_INFO[k].desc}
+          </span>
+        </li>
       ))}
-    </p>
+    </ul>
   );
 }
 
@@ -907,31 +1006,122 @@ export default function Page() {
   if (!room) {
     return (
       <main>
-        <div className="card">
-          <h1>Ular Tangga Kuis</h1>
-          <p className="mute">
-            Jawab soal dengan benar untuk boleh mengocok dadu. Jawaban salah
-            membuat giliranmu dilewati. Pemain yang sampai kotak 100 mendapat
-            peringkat. Kalau pemainnya banyak, permainan berlanjut sampai
-            tinggal 2 pemain yang belum finis. Dapat angka 6 berarti kocok dadu
-            lagi, tapi kalau dapat 6 tiga kali berturut-turut, bidakmu kembali
-            ke kotak 1.
-          </p>
-        </div>
+        <header className="hero">
+          <div className="hero-body">
+            <span className="hero-badge">✨ Kuis × Ular Tangga</span>
+            <h1>
+              Ular Tangga <em>Kuis</em>
+            </h1>
+            <p className="hero-lead">
+              Jawab soal dulu, baru boleh mengocok dadu. Siapa yang paling dulu
+              sampai kotak 100?
+            </p>
+            <ol className="hero-steps">
+              <li>
+                <span>🧠</span>Jawab soal
+              </li>
+              <li>
+                <span>🎲</span>Kocok dadu
+              </li>
+              <li>
+                <span>🏁</span>Capai kotak 100
+              </li>
+            </ol>
+            <details className="rules">
+              <summary>Lihat aturan lengkap</summary>
+              <ul>
+                <li>
+                  Jawab soal dengan benar untuk boleh mengocok dadu. Jawaban
+                  salah membuat giliranmu dilewati.
+                </li>
+                <li>
+                  Pemain yang sampai kotak 100 mendapat peringkat. Kalau
+                  pemainnya banyak, permainan berlanjut sampai tinggal 2 pemain
+                  yang belum finis.
+                </li>
+                <li>
+                  Dapat angka 6 berarti kocok dadu lagi, tapi kalau dapat 6 tiga
+                  kali berturut-turut, bidakmu kembali ke kotak 1.
+                </li>
+              </ul>
+            </details>
+          </div>
+          <svg
+            className="hero-art"
+            viewBox="0 0 240 200"
+            fill="none"
+            aria-hidden="true"
+          >
+            <g strokeLinecap="round">
+              <path
+                d="M150 190L184 22M190 190L224 22"
+                stroke="#fff"
+                strokeOpacity=".6"
+                strokeWidth="7"
+              />
+              <path
+                d="M156 160h36M163 126h36M170 92h36M177 58h36"
+                stroke="#fff"
+                strokeOpacity=".45"
+                strokeWidth="5"
+              />
+            </g>
+            <path
+              d="M20 186c60-10 96-34 52-66S30 70 84 54s58-30 24-44"
+              stroke="#0b3b2e"
+              strokeOpacity=".35"
+              strokeWidth="18"
+              strokeLinecap="round"
+              transform="translate(3 5)"
+            />
+            <path
+              d="M20 186c60-10 96-34 52-66S30 70 84 54s58-30 24-44"
+              stroke="#34d399"
+              strokeWidth="14"
+              strokeLinecap="round"
+            />
+            <path
+              d="M20 186c60-10 96-34 52-66S30 70 84 54s58-30 24-44"
+              stroke="#047857"
+              strokeOpacity=".45"
+              strokeWidth="14"
+              strokeDasharray="3 11"
+            />
+            <circle cx="108" cy="12" r="11" fill="#34d399" />
+            <circle cx="104" cy="9" r="3.4" fill="#fff" />
+            <circle cx="104" cy="9" r="1.5" fill="#1b1f4b" />
+            <rect
+              x="112"
+              y="96"
+              width="48"
+              height="48"
+              rx="12"
+              fill="#fff"
+              transform="rotate(-12 136 120)"
+            />
+            <g fill="#4f46e5" transform="rotate(-12 136 120)">
+              <circle cx="124" cy="108" r="4.2" />
+              <circle cx="148" cy="108" r="4.2" />
+              <circle cx="136" cy="120" r="4.2" />
+              <circle cx="124" cy="132" r="4.2" />
+              <circle cx="148" cy="132" r="4.2" />
+            </g>
+          </svg>
+        </header>
+
         {resume && (
-          <div className="card">
-            <button
-              className="btn sun"
-              style={{ marginTop: 0 }}
-              onClick={() => enter(resume)}
-            >
-              Lanjutkan room {resume.id}
+          <div className="card resume">
+            <button className="btn sun" onClick={() => enter(resume)}>
+              ▶ Lanjutkan room {resume.id}
             </button>
           </div>
         )}
+
         <div className="ut-menu">
           <div className="card">
-            <h2>Pengaturan</h2>
+            <h2>
+              <span className="ico">⚙️</span>Pengaturan
+            </h2>
             <label htmlFor="n">Nama kamu (untuk main online)</label>
             <input
               id="n"
@@ -940,7 +1130,7 @@ export default function Page() {
               placeholder="Contoh: Dewi"
               onChange={(e) => setName(e.target.value)}
             />
-            <label style={{ marginTop: 14 }}>Tingkat soal</label>
+            <label className="mt">Tingkat soal</label>
             <div className="lv" role="radiogroup" aria-label="Tingkat soal">
               {LEVELS.map(([k, t, d]) => (
                 <button
@@ -951,27 +1141,24 @@ export default function Page() {
                   className={level === k ? "on" : ""}
                   onClick={() => setLevel(k)}
                 >
+                  <span className="ico">{LVL_ICO[k]}</span>
                   <b>{t}</b>
                   <small>{d}</small>
                 </button>
               ))}
             </div>
-            <label style={{ marginTop: 14 }}>Pemulihan skill</label>
+            <label className="mt">Pemulihan skill</label>
             <SkillRule value={recharge} onChange={changeRecharge} />
-            <label style={{ marginTop: 14 }}>Map</label>
+            <label className="mt">Map</label>
             <MapPick value={mapId} onChange={setMapId} />
           </div>
+
           <div className="card">
-            <h2>Main online</h2>
-            <p className="mute" style={{ marginBottom: 6 }}>
-              Buat room lalu bagikan ID-nya ke teman.
-            </p>
-            <button
-              className="btn"
-              style={{ marginTop: 8 }}
-              onClick={createOnline}
-              disabled={busy}
-            >
+            <h2>
+              <span className="ico cyan">🌐</span>Main online
+            </h2>
+            <p className="mute">Buat room lalu bagikan ID-nya ke teman.</p>
+            <button className="btn" onClick={createOnline} disabled={busy}>
               Buat room baru
             </button>
             <p className="ut-or">atau gabung ke room teman</p>
@@ -981,7 +1168,6 @@ export default function Page() {
               maxLength={5}
               value={joinId}
               placeholder="Contoh: K7M2P"
-              style={{ textTransform: "uppercase" }}
               onChange={(e) => setJoinId(e.target.value.toUpperCase())}
             />
             <button className="btn alt" onClick={joinRoom} disabled={busy}>
@@ -993,43 +1179,42 @@ export default function Page() {
             </p>
           </div>
         </div>
+
         <div className="card">
-          <h2>Main 1 perangkat (gantian)</h2>
+          <h2>
+            <span className="ico pink">🎮</span>Main 1 perangkat (gantian)
+          </h2>
           <p className="mute">Semua pemain bergantian memakai perangkat ini.</p>
-          <label htmlFor="cnt">Jumlah pemain</label>
-          <select
-            id="cnt"
-            value={locals.length}
-            onChange={(e) => setCount(+e.target.value)}
-            style={{
-              width: "100%",
-              font: "inherit",
-              padding: 12,
-              border: "2px solid var(--line)",
-              borderRadius: 14,
-              marginBottom: 10,
-            }}
-          >
-            {[2, 3, 4, 5, 6].map((n) => (
-              <option key={n} value={n}>
-                {n} pemain
-              </option>
-            ))}
-          </select>
-          <div className="ut-names">
-            {locals.map((v, i) => (
-              <input
-                key={i}
-                maxLength={16}
-                value={v}
-                aria-label={`Nama pemain ${i + 1}`}
-                onChange={(e) =>
-                  setLocals((a) =>
-                    a.map((x, j) => (j === i ? e.target.value : x)),
-                  )
-                }
-              />
-            ))}
+          <div className="ut-local">
+            <div>
+              <label htmlFor="cnt">Jumlah pemain</label>
+              <select
+                id="cnt"
+                value={locals.length}
+                onChange={(e) => setCount(+e.target.value)}
+              >
+                {[2, 3, 4, 5, 6].map((n) => (
+                  <option key={n} value={n}>
+                    {n} pemain
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="ut-names">
+              {locals.map((v, i) => (
+                <input
+                  key={i}
+                  maxLength={16}
+                  value={v}
+                  aria-label={`Nama pemain ${i + 1}`}
+                  onChange={(e) =>
+                    setLocals((a) =>
+                      a.map((x, j) => (j === i ? e.target.value : x)),
+                    )
+                  }
+                />
+              ))}
+            </div>
           </div>
           <button className="btn" onClick={createLocal} disabled={busy}>
             Mulai permainan
@@ -1069,25 +1254,32 @@ export default function Page() {
   return (
     <main>
       <div className="ut-top">
-        <div>
-          <b>Ular Tangga Kuis</b>{" "}
-          <span className="mute">
-            · Room {room.id} · {LNAME[room.level]} · {getMap(room.map).name}
-            {room.mode === "local" ? " · 1 perangkat" : ""}
+        <div className="ut-brand">
+          <span className="ut-logo" aria-hidden="true">
+            🐍
           </span>
+          <div>
+            <b>Ular Tangga Kuis</b>
+            <div className="ut-meta">
+              <span className="ut-tag">Room {room.id}</span>
+              <span className="ut-tag">{LNAME[room.level]}</span>
+              <span className="ut-tag">{getMap(room.map).name}</span>
+              {room.mode === "local" && (
+                <span className="ut-tag">1 perangkat</span>
+              )}
+            </div>
+          </div>
         </div>
-        <button
-          className="btn alt"
-          style={{ width: "auto", marginTop: 0, padding: "8px 16px" }}
-          onClick={() => leave()}
-        >
+        <button className="btn alt ut-exit" onClick={() => leave()}>
           Keluar
         </button>
       </div>
 
       {room.status === "lobby" && (
         <div className="card">
-          <h2>Ruang tunggu</h2>
+          <h2>
+            <span className="ico">🚪</span>Ruang tunggu
+          </h2>
           <div className="ut-room">{room.id}</div>
           <p className="mute">
             Bagikan ID ini atau tautan undangan ke temanmu (maksimal 6 pemain).
@@ -1180,14 +1372,24 @@ export default function Page() {
             <div className="card">
               <div className="ut-turn">
                 <span
-                  className="ut-dot"
-                  style={{ background: COLORS[(winner || cur).color] }}
-                />
-                {room.status === "finished"
-                  ? winner
-                    ? `${winner.name} juara 1!`
-                    : "Permainan selesai"
-                  : `Giliran ${cur.name}${room.mode === "online" && mine ? " (kamu)" : ""}`}
+                  className="ut-avatar"
+                  style={{ "--c": COLORS[(winner || cur).color] }}
+                  aria-hidden="true"
+                >
+                  {face(winner || cur)}
+                </span>
+                <div>
+                  <small className="ut-turn-k">
+                    {room.status === "finished" ? "Hasil akhir" : "Giliran"}
+                  </small>
+                  <div className="ut-turn-n">
+                    {room.status === "finished"
+                      ? winner
+                        ? `${winner.name} juara 1!`
+                        : "Permainan selesai"
+                      : `${cur.name}${room.mode === "online" && mine ? " (kamu)" : ""}`}
+                  </div>
+                </div>
               </div>
               {spec && (
                 <p className="ut-spec">
@@ -1212,13 +1414,15 @@ export default function Page() {
                 room.phase === "answer" &&
                 room.q && (
                   <>
-                    <p className="q" style={{ fontSize: 19, minHeight: 0 }}>
-                      {room.q.q}
-                    </p>
+                    <div className="q-label">
+                      🧠 Jawab soal · {LNAME[room.level]}
+                    </div>
+                    <p className="q">{room.q.q}</p>
                     {room.q.options.map((o, k) => (
                       <button
                         key={o}
                         className="opt"
+                        data-k={k}
                         disabled={!mine || busy}
                         onClick={() => act("answer", { pick: o })}
                       >
@@ -1240,7 +1444,9 @@ export default function Page() {
                     disabled={!mine || busy}
                     onClick={() => act("roll")}
                   >
-                    {mine ? "Kocok dadu" : `Menunggu ${cur.name} mengocok...`}
+                    {mine
+                      ? "🎲 Kocok dadu"
+                      : `Menunggu ${cur.name} mengocok...`}
                   </button>
                 </div>
               )}
@@ -1294,13 +1500,17 @@ export default function Page() {
             </div>
 
             <div className="card">
-              <h2>Pemain</h2>
+              <h2>
+                <span className="ico">👥</span>Pemain
+              </h2>
               <PlayerList room={room} />
               <Spectators room={room} />
               <p className="hint">{ruleText(room.recharge)}</p>
             </div>
             <div className="card">
-              <h2>Riwayat</h2>
+              <h2>
+                <span className="ico">📜</span>Riwayat
+              </h2>
               <ul className="ut-log">
                 {room.log.map((t, i) => (
                   <li key={i}>{t}</li>
@@ -1373,6 +1583,7 @@ export default function Page() {
             />
           ))}
           <div className="pop">
+            <span className="pop-ico">🏆</span>
             <b>{party.title}</b>
             <span className="mute">{party.sub}</span>
           </div>
