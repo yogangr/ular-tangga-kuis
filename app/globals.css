@@ -540,9 +540,6 @@ main > .hero,
 
 /* ---------- Header room ---------- */
 .ut-top {
-  position: sticky;
-  top: 10px;
-  z-index: 30;
   display: flex;
   justify-content: space-between;
   align-items: center;
