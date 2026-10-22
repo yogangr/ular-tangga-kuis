@@ -320,6 +320,36 @@ button:focus-visible {
     radial-gradient(circle at 30% 70%, #ffb020 0 12%, transparent 13%),
     radial-gradient(circle at 70% 40%, #ff8a1f 0 9%, transparent 10%), #c2310f;
 }
+.ut-cell.es {
+  color: #1e3a5f;
+  background:
+    radial-gradient(
+      circle at 25% 25%,
+      rgba(255, 255, 255, 0.95) 0 9%,
+      transparent 10%
+    ),
+    linear-gradient(135deg, #e6f9ff, #9bd6f2);
+}
+.ut-cell.portal {
+  position: relative;
+  color: #ede9fe;
+  text-shadow: 0 0 3px #3b0764;
+  background: repeating-radial-gradient(
+    circle at 50% 50%,
+    #8b5cf6 0 3px,
+    #5b21b6 3px 6px
+  );
+}
+.ut-cell.portal::after {
+  content: attr(data-pl);
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-size: clamp(9px, 2.2vw, 15px);
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 0 3px #3b0764;
+}
 .ut-key {
   display: inline-block;
   width: 12px;
@@ -334,6 +364,14 @@ button:focus-visible {
 .ut-key.lava {
   background: #e8431a;
   border: 1px solid #9a2508;
+}
+.ut-key.es {
+  background: linear-gradient(135deg, #e6f9ff, #9bd6f2);
+  border: 1px solid #5ba9d0;
+}
+.ut-key.portal {
+  background: repeating-radial-gradient(circle, #8b5cf6 0 2px, #5b21b6 2px 4px);
+  border: 1px solid #3b0764;
 }
 .ut-svg {
   position: absolute;

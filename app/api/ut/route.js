@@ -64,6 +64,9 @@ const MAX_SIXES = 3;
 const RESET_TO = 1;
 // Kotak lava: bidak yang mendarat di sana terdorong mundur sebanyak ini
 const LAVA_BACK = 3;
+// Kotak es: bidak meluncur maju acak antara ICE_MIN dan ICE_MAX kotak
+const ICE_MIN = 2;
+const ICE_MAX = 3;
 const active = (s) => s.players.filter((p) => !p.left);
 // Bagikan hewan acak: tiap pemain mendapat hewan berbeda (9 hewan, maksimal 6 pemain) beserta skill-nya yang masih utuh
 function dealAnimals(s) {
@@ -423,10 +426,42 @@ async function resolveRoll(s, row, p, d, o = {}) {
   }
   p.pos = end;
   const tile = map.tiles[p.pos] || null; // kotak spesial di tempat bidak berhenti
+  let slide = null; // es: { to, end, kind, shield } hasil meluncur maju
+  let portal = null; // portal: kotak tujuan
   if (tile === "lava") {
     p.pos = Math.max(1, p.pos - LAVA_BACK);
     end = p.pos;
   } // lava: bidak terdorong mundur
+  else if (tile === "es") {
+    // es: meluncur maju, lalu tangga/ular di kotak tujuan tetap berlaku (untung-untungan)
+    const to2 = Math.min(
+      100,
+      p.pos + ICE_MIN + Math.floor(Math.random() * (ICE_MAX - ICE_MIN + 1)),
+    );
+    let end2 = to2,
+      kind2 = null,
+      shield2 = false;
+    if (map.ladders[to2]) {
+      end2 = map.ladders[to2];
+      kind2 = "ladder";
+    } else if (map.snakes[to2]) {
+      end2 = map.snakes[to2];
+      kind2 = "snake";
+    }
+    if (kind2 === "snake" && p.animal === "panda" && !p.spent) {
+      // Kulit Tebal juga menahan gigitan ular setelah meluncur
+      p.spent = true;
+      p.streak = 0;
+      shield2 = true;
+      end2 = to2;
+      kind2 = null;
+    }
+    slide = { to: to2, end: end2, kind: kind2, shield: shield2 };
+    p.pos = end = end2;
+  } else if (tile === "portal") {
+    portal = map.portals[p.pos];
+    p.pos = end = portal;
+  } // portal: pindah ke pasangannya
   s.move = {
     n: s.n,
     who: p.id,
@@ -434,8 +469,12 @@ async function resolveRoll(s, row, p, d, o = {}) {
     from,
     to,
     end,
-    kind: tile === "lava" ? "lava" : kind,
+    kind: tile === "lava" ? "lava" : slide ? "ice" : portal ? "portal" : kind,
   };
+  if (slide) {
+    s.move.slideTo = slide.to;
+    s.move.slideKind = slide.kind;
+  }
   let text = `${p.name} ${o.how || `mengocok ${d}`} dan sampai di kotak ${to}`;
   text +=
     kind === "ladder"
@@ -445,6 +484,19 @@ async function resolveRoll(s, row, p, d, o = {}) {
         : shield
           ? `, tetapi Kulit Tebal menahan gigitan ular! Tetap di kotak ${to}.`
           : ".";
+  if (slide) {
+    text += ` Kotak es! ${p.name} meluncur ke kotak ${slide.to}`;
+    text +=
+      slide.kind === "ladder"
+        ? `, naik tangga ke ${slide.end}!`
+        : slide.kind === "snake"
+          ? `, dimakan ular dan turun ke ${slide.end}.`
+          : slide.shield
+            ? ", tetapi Kulit Tebal menahan gigitan ular!"
+            : ".";
+  }
+  if (portal)
+    text += ` Portal ${map.portalLabels[to]}! ${p.name} tersedot dan muncul di kotak ${portal} (${portal > to ? "maju jauh!" : "mundur..."})`;
   let finished = null,
     over = false,
     bonus = false;
@@ -470,7 +522,7 @@ async function resolveRoll(s, row, p, d, o = {}) {
     await nextTurn(s, row.level);
     text += ` Giliran ${s.players[s.turn].name}.`;
   } else if (tile === "lava") {
-    // terkena lava: sudah terdorong mundur di atas, bonus dadu 6 hangus
+    // terkena lava: mundur, bonus dadu 6 hangus
     p.sixes = 0;
     text += ` Kotak lava! ${p.name} terbakar dan terdorong mundur ke kotak ${p.pos}.`;
     await nextTurn(s, row.level);
@@ -482,18 +534,26 @@ async function resolveRoll(s, row, p, d, o = {}) {
     await nextTurn(s, row.level);
     text += ` Giliran ${s.players[s.turn].name}.`;
   }
-  s.last = {
-    n: s.n,
-    type: "roll",
-    who: p.id,
-    dice: d,
-    kind: shield
+  const lastKind =
+    shield || slide?.shield
       ? "shield"
       : tile === "lumpur" && p.pos !== 100
         ? "mud"
         : tile === "lava"
           ? "lava"
-          : kind,
+          : slide
+            ? slide.kind || "ice"
+            : portal
+              ? portal > to
+                ? "portal_up"
+                : "portal_down"
+              : kind;
+  s.last = {
+    n: s.n,
+    type: "roll",
+    who: p.id,
+    dice: d,
+    kind: lastKind,
     finished,
     over,
     bonus,
@@ -739,13 +799,24 @@ async function act(b) {
         needPhase("roll", "Dadu Ganda dipakai saat mengocok dadu.");
         const a = die(),
           c = die();
-        // Nilai hasil tiap dadu (memperhitungkan tangga, ular, lumpur, lava, dan aturan tiga kali 6)
+        // Nilai hasil tiap dadu (memperhitungkan tangga, ular, kotak spesial, dan aturan tiga kali 6)
         const map = getMap(s.map);
         const val = (d) => {
           if (d === 6 && (p.sixes || 0) + 1 >= MAX_SIXES) return RESET_TO;
           const e = landing(p.pos, d, map).end;
           const t = map.tiles[e];
-          return t === "lumpur" ? e - 4 : t === "lava" ? e - LAVA_BACK : e; // lumpur = hilang satu giliran (~4 kotak), lava = mundur
+          if (t === "lumpur") return e - 4; // hilang satu giliran (~4 kotak)
+          if (t === "lava") return e - LAVA_BACK;
+          if (t === "portal") return map.portals[e];
+          if (t === "es") {
+            // rata-rata hasil meluncur 2 dan 3 kotak
+            const f = (n) => {
+              const t2 = Math.min(100, e + n);
+              return map.ladders[t2] ?? map.snakes[t2] ?? t2;
+            };
+            return (f(ICE_MIN) + f(ICE_MAX)) / 2;
+          }
+          return e;
         };
         const pick = val(a) > val(c) || (val(a) === val(c) && a >= c) ? a : c;
         use();

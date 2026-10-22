@@ -210,7 +210,7 @@ function Board({ players, move, turn, playing, map }) {
       ),
     );
 
-  // Mainkan satu langkah: lompat kotak demi kotak, lalu naik tangga / meluncur di tubuh ular / terdorong dari lava
+  // Mainkan satu langkah: lompat kotak demi kotak, lalu tangga / ular / lava / es / portal
   async function play(m) {
     const reduce =
       typeof window !== "undefined" &&
@@ -257,45 +257,64 @@ function Board({ players, move, turn, playing, map }) {
         await wait(HOP);
       }
     }
-    if (m.kind === "ladder") {
-      await wait(120);
-      const [x1, y1] = cx(m.to),
-        [x2, y2] = cx(m.end);
-      const steps = Math.min(
-        14,
-        Math.max(3, Math.round(Math.hypot(x2 - x1, y2 - y1) / 7)),
-      );
-      for (let i = 1; i <= steps; i++) {
-        if (!alive.current) return;
-        put(
-          m.who,
-          x1 + ((x2 - x1) * i) / steps,
-          y1 + ((y2 - y1) * i) / steps,
-          150,
-          "climb",
+    // Naik tangga atau meluncur di tubuh ular dari kotak a ke kotak b
+    const travel = async (kind, a, b) => {
+      if (kind === "ladder") {
+        await wait(120);
+        const [x1, y1] = cx(a),
+          [x2, y2] = cx(b);
+        const steps = Math.min(
+          14,
+          Math.max(3, Math.round(Math.hypot(x2 - x1, y2 - y1) / 7)),
         );
-        await wait(150);
+        for (let i = 1; i <= steps; i++) {
+          if (!alive.current) return;
+          put(
+            m.who,
+            x1 + ((x2 - x1) * i) / steps,
+            y1 + ((y2 - y1) * i) / steps,
+            150,
+            "climb",
+          );
+          await wait(150);
+        }
+      } else if (kind === "snake") {
+        await wait(180);
+        const [x1, y1] = cx(a),
+          [x2, y2] = cx(b);
+        const N = Math.min(
+          56,
+          Math.max(18, Math.round(Math.hypot(x2 - x1, y2 - y1) * 1.5)),
+        );
+        const pts = snakePts(a, b, N);
+        for (let i = 1; i < pts.length; i++) {
+          if (!alive.current) return;
+          put(m.who, pts[i][0], pts[i][1], 40, "slide");
+          await wait(40);
+        }
       }
-    } else if (m.kind === "snake") {
-      await wait(180);
-      const [x1, y1] = cx(m.to),
-        [x2, y2] = cx(m.end);
-      const N = Math.min(
-        56,
-        Math.max(18, Math.round(Math.hypot(x2 - x1, y2 - y1) * 1.5)),
-      );
-      const pts = snakePts(m.to, m.end, N);
-      for (let i = 1; i < pts.length; i++) {
-        if (!alive.current) return;
-        put(m.who, pts[i][0], pts[i][1], 40, "slide");
-        await wait(40);
-      }
+    };
+    if (m.kind === "ladder" || m.kind === "snake") {
+      await travel(m.kind, m.to, m.end);
     } else if (m.kind === "lava") {
       // terdorong mundur dari kotak lava
       await wait(250);
       const [x2, y2] = cx(m.end);
       put(m.who, x2, y2, 600, "slide");
       await wait(600);
+    } else if (m.kind === "ice") {
+      // meluncur maju di es, lalu mungkin naik tangga / dimakan ular
+      await wait(200);
+      const [xs, ys] = cx(m.slideTo);
+      put(m.who, xs, ys, 450, "slide");
+      await wait(450);
+      if (m.slideKind) await travel(m.slideKind, m.slideTo, m.end);
+    } else if (m.kind === "portal") {
+      // tersedot portal, muncul di pasangannya
+      await wait(300);
+      const [x2, y2] = cx(m.end);
+      put(m.who, x2, y2, 0, "drop");
+      await wait(480);
     }
     await wait(150);
   }
@@ -328,6 +347,7 @@ function Board({ players, move, turn, playing, map }) {
             (n === 100 ? " end" : "") +
             (t ? " " + t : "")
           }
+          data-pl={mp.portalLabels?.[n]}
         >
           {n}
         </div>,
@@ -1033,12 +1053,15 @@ export default function Page() {
         last.kind === "snake" ||
         last.kind === "reset" ||
         last.kind === "mud" ||
-        last.kind === "lava"
+        last.kind === "lava" ||
+        last.kind === "portal_down"
       ? " bad"
       : last.type === "correct" ||
           last.type === "skill" ||
           last.kind === "ladder" ||
           last.kind === "shield" ||
+          last.kind === "ice" ||
+          last.kind === "portal_up" ||
           last.bonus
         ? " good"
         : "";
