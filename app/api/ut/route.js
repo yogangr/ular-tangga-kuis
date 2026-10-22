@@ -77,7 +77,22 @@ function dealAnimals(s) {
     p.streak = 0;
     p.skip = false;
     p.sixes = 0;
+    p.extra = [];
   });
+}
+// Kulit Tebal: kebal satu gigitan ular. Skill milik sendiri dipakai dulu, lalu skill bonus dari peti harta karun.
+function useShield(p) {
+  if (p.animal === "panda" && !p.spent) {
+    p.spent = true;
+    p.streak = 0;
+    return true;
+  }
+  const i = (p.extra || []).indexOf("panda");
+  if (i >= 0) {
+    p.extra.splice(i, 1);
+    return true;
+  }
+  return false;
 }
 const racing = (s) => s.players.filter((p) => !p.left && !p.done);
 
@@ -133,6 +148,7 @@ const pub = (row, s) => ({
       left,
       done,
       rank,
+      extra,
     }) => ({
       id,
       name,
@@ -145,6 +161,7 @@ const pub = (row, s) => ({
       left: !!left,
       done: !!done,
       rank: rank ?? null,
+      extra: extra ?? [],
     }),
   ),
   ranking: s.ranking ?? [],
@@ -416,10 +433,8 @@ async function resolveRoll(s, row, p, d, o = {}) {
   }
   let { to, end, kind } = landing(p.pos, steps, map);
   let shield = false;
-  if (kind === "snake" && p.animal === "panda" && !p.spent) {
+  if (kind === "snake" && useShield(p)) {
     // Kulit Tebal: kebal satu gigitan ular
-    p.spent = true;
-    p.streak = 0;
     shield = true;
     end = to;
     kind = null;
@@ -448,10 +463,8 @@ async function resolveRoll(s, row, p, d, o = {}) {
       end2 = map.snakes[to2];
       kind2 = "snake";
     }
-    if (kind2 === "snake" && p.animal === "panda" && !p.spent) {
+    if (kind2 === "snake" && useShield(p)) {
       // Kulit Tebal juga menahan gigitan ular setelah meluncur
-      p.spent = true;
-      p.streak = 0;
       shield2 = true;
       end2 = to2;
       kind2 = null;
@@ -497,6 +510,13 @@ async function resolveRoll(s, row, p, d, o = {}) {
   }
   if (portal)
     text += ` Portal ${map.portalLabels[to]}! ${p.name} tersedot dan muncul di kotak ${portal} (${portal > to ? "maju jauh!" : "mundur..."})`;
+  if (tile === "harta") {
+    // peti harta karun: dapat 1 skill sekali pakai dari hewan lain (bukan hewannya sendiri), tanpa batas jumlah
+    const pool = AIDS.filter((x) => x !== p.animal);
+    const got = pool[Math.floor(Math.random() * pool.length)];
+    (p.extra ??= []).push(got);
+    text += ` Kotak harta karun! ${p.name} menemukan peti berisi skill ${ICON[got]} ${SKILLS[got].name} (sekali pakai).`;
+  }
   let finished = null,
     over = false,
     bonus = false;
@@ -547,7 +567,9 @@ async function resolveRoll(s, row, p, d, o = {}) {
               ? portal > to
                 ? "portal_up"
                 : "portal_down"
-              : kind;
+              : tile === "harta"
+                ? "harta"
+                : kind;
   s.last = {
     n: s.n,
     type: "roll",
@@ -669,6 +691,7 @@ async function act(b) {
           x.spent = false;
           x.streak = 0;
           x.skip = false;
+          x.extra = [];
         }
       s.finishOrder = [];
       s.ranking = [];
@@ -728,9 +751,17 @@ async function act(b) {
         s.last = { n: s.n, type: "correct", who: p.id, text };
       } else {
         p.streak = 0;
+        // Sembilan Nyawa: skill sendiri dipakai dulu, lalu skill bonus dari peti harta karun
+        let saved = false;
         if (p.animal === "kucing" && !p.spent) {
-          // Sembilan Nyawa: salah pertama dimaafkan, pilihan yang salah dihapus, boleh menjawab lagi
           p.spent = true;
+          saved = true;
+        } else if ((p.extra || []).includes("kucing")) {
+          p.extra.splice(p.extra.indexOf("kucing"), 1);
+          saved = true;
+        }
+        if (saved) {
+          // salah pertama dimaafkan, pilihan yang salah dihapus, boleh menjawab lagi
           s.q.options = s.q.options.filter((o) => o !== b.pick);
           s.last = {
             n: s.n,
@@ -753,14 +784,24 @@ async function act(b) {
     }
 
     if (b.action === "skill") {
-      const sk = SKILLS[p.animal];
+      // Skill sendiri (bawaan) atau skill bonus dari peti harta karun (b.extra = id hewan, sekali pakai tanpa pemulihan)
+      const fromExtra = b.extra != null;
+      const sid = fromExtra ? String(b.extra) : p.animal;
+      if (fromExtra && !(p.extra || []).includes(sid))
+        throw new E("Kamu tidak punya skill bonus itu.");
+      const sk = SKILLS[sid];
       if (!sk) throw new E("Kamu belum punya skill.");
       if (sk.when === "passive")
         throw new E("Skill ini aktif otomatis, tidak perlu ditekan.");
-      if (p.spent) throw new E("Skill sedang tidak bisa dipakai.");
+      if (!fromExtra && p.spent)
+        throw new E("Skill sedang tidak bisa dipakai.");
+      const src = fromExtra ? " dari peti" : "";
       const use = () => {
-        p.spent = true;
-        p.streak = 0;
+        if (fromExtra) p.extra.splice(p.extra.indexOf(sid), 1);
+        else {
+          p.spent = true;
+          p.streak = 0;
+        }
       };
       const note = (text) => {
         s.n++;
@@ -771,7 +812,7 @@ async function act(b) {
         if (s.phase !== ph) throw new E(msg);
       };
 
-      if (p.animal === "rubah") {
+      if (sid === "rubah") {
         needPhase("answer", "Akal Bulus dipakai saat menjawab soal.");
         if (s.q.options.length <= 2)
           throw new E("Pilihan jawaban sudah tinggal dua.");
@@ -784,18 +825,18 @@ async function act(b) {
         s.q.options = s.q.options.filter((o) => !gone.includes(o));
         use();
         note(
-          `${p.name} memakai Akal Bulus: ${gone.length} pilihan yang salah dihapus!`,
+          `${p.name} memakai Akal Bulus${src}: ${gone.length} pilihan yang salah dihapus!`,
         );
         return;
       }
-      if (p.animal === "monyet") {
+      if (sid === "monyet") {
         needPhase("answer", "Tukar Soal dipakai saat menjawab soal.");
         s.q = await pickQ(row.level, s.used);
         use();
-        note(`${p.name} memakai Tukar Soal: soal diganti!`);
+        note(`${p.name} memakai Tukar Soal${src}: soal diganti!`);
         return;
       }
-      if (p.animal === "kelinci") {
+      if (sid === "kelinci") {
         needPhase("roll", "Dadu Ganda dipakai saat mengocok dadu.");
         const a = die(),
           c = die();
@@ -808,6 +849,7 @@ async function act(b) {
           if (t === "lumpur") return e - 4; // hilang satu giliran (~4 kotak)
           if (t === "lava") return e - LAVA_BACK;
           if (t === "portal") return map.portals[e];
+          if (t === "harta") return e + 3; // peti = skill tambahan (~3 kotak)
           if (t === "es") {
             // rata-rata hasil meluncur 2 dan 3 kotak
             const f = (n) => {
@@ -821,28 +863,28 @@ async function act(b) {
         const pick = val(a) > val(c) || (val(a) === val(c) && a >= c) ? a : c;
         use();
         await resolveRoll(s, row, p, pick, {
-          how: `memakai Dadu Ganda (dadu ${a} & ${c}, dipilih ${pick})`,
+          how: `memakai Dadu Ganda${src} (dadu ${a} & ${c}, dipilih ${pick})`,
         });
         return;
       }
-      if (p.animal === "katak") {
+      if (sid === "katak") {
         needPhase("roll", "Lompat Jauh dipakai saat mengocok dadu.");
         const d = die();
         use();
         await resolveRoll(s, row, p, d, {
           plus: 3,
-          how: `memakai Lompat Jauh (dadu ${d} +3 = ${d + 3} langkah)`,
+          how: `memakai Lompat Jauh${src} (dadu ${d} +3 = ${d + 3} langkah)`,
         });
         return;
       }
-      if (p.animal === "penguin") {
+      if (sid === "penguin") {
         needPhase("roll", "Seluncur Es dipakai saat mengocok dadu.");
         const v = b.value;
         if (!Number.isInteger(v) || v < 1 || v > 5)
           throw new E("Pilih angka dadu 1 sampai 5.");
         use();
         await resolveRoll(s, row, p, v, {
-          how: `memilih angka ${v} lewat Seluncur Es`,
+          how: `memilih angka ${v} lewat Seluncur Es${src}`,
         });
         return;
       }
@@ -852,12 +894,12 @@ async function act(b) {
       const t = Number.isInteger(b.target) ? s.players[b.target] : null;
       if (!t || t.left || t.done || t.id === p.id)
         throw new E("Pilih lawan yang masih bermain.");
-      if (p.animal === "singa") {
+      if (sid === "singa") {
         if (t.skip) throw new E(`${t.name} sudah akan melewatkan giliran.`);
         t.skip = "auman";
         use();
         note(
-          `${p.name} mengaum! ${t.name} akan melewatkan giliran berikutnya.`,
+          `${p.name} mengaum${src}! ${t.name} akan melewatkan giliran berikutnya.`,
         );
       } else {
         if (t.pos < 2) throw new E(`${t.name} belum bisa dimundurkan.`);
@@ -865,7 +907,7 @@ async function act(b) {
         t.pos = Math.max(1, t.pos - 4);
         use();
         note(
-          `${p.name} menerkam ${t.name}! Mundur dari kotak ${from} ke kotak ${t.pos}.`,
+          `${p.name} menerkam ${t.name}${src}! Mundur dari kotak ${from} ke kotak ${t.pos}.`,
         );
         s.move = {
           n: s.n,

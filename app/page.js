@@ -30,7 +30,10 @@ const skillLine = (p, recharge) => {
     : recharge > 0
       ? `terpakai, pulih ${p.streak}/${recharge}`
       : "terpakai";
-  return `${sk.name} · ${st}${p.skip ? " · akan dilewati" : ""}`;
+  const bonus = p.extra?.length
+    ? ` · bonus ${p.extra.map((a) => AMAP[a]?.e ?? "🐾").join("")}`
+    : "";
+  return `${sk.name} · ${st}${p.skip ? " · akan dilewati" : ""}${bonus}`;
 };
 const SC = ["#ef4444", "#22a559", "#8b5cf6", "#f59e0b", "#0ea5e9", "#ec4899"]; // warna ular
 const LVL_ICO = { mudah: "🌱", sedang: "📘", sulit: "🔥", olimpiade: "🏆" };
@@ -39,6 +42,7 @@ const MAP_ICO = {
   rawa: "🐸",
   gunung: "🌋",
   es: "🧊",
+  harta: "💎",
   portal: "🌀",
 };
 const PIPS = {
@@ -641,13 +645,12 @@ function AnimalGuide() {
   );
 }
 
-// Kartu skill untuk pemain yang sedang giliran
-function SkillPanel({ room, busy, onUse }) {
-  const p = room.players[room.turn];
-  const sk = p && SKILLS[p.animal];
-  if (!sk || room.status !== "playing" || p.done) return null;
+// Satu kartu skill. extra = true berarti skill bonus dari peti harta karun (sekali pakai, tanpa pemulihan)
+function SkillCard({ room, busy, onUse, p, a, extra }) {
+  const sk = SKILLS[a];
   const ph = room.phase,
-    ready = !p.spent;
+    ready = extra || !p.spent;
+  const ex = extra ? { extra: a } : {};
   const targets = room.players.filter(
     (x) => !x.left && !x.done && x.id !== p.id,
   );
@@ -669,14 +672,14 @@ function SkillPanel({ room, busy, onUse }) {
         disabled={
           busy ||
           ph !== "answer" ||
-          (p.animal === "rubah" && (room.q?.options.length ?? 0) <= 2)
+          (a === "rubah" && (room.q?.options.length ?? 0) <= 2)
         }
-        onClick={() => onUse({})}
+        onClick={() => onUse({ ...ex })}
       >
         Pakai {sk.name}
       </button>
     );
-  } else if (p.animal === "penguin") {
+  } else if (a === "penguin") {
     body = (
       <>
         <p className="hint">
@@ -687,7 +690,7 @@ function SkillPanel({ room, busy, onUse }) {
             key={v}
             className="btn alt"
             disabled={busy || ph !== "roll"}
-            onClick={() => onUse({ value: v })}
+            onClick={() => onUse({ ...ex, value: v })}
           >
             {v}
           </button>
@@ -699,7 +702,7 @@ function SkillPanel({ room, busy, onUse }) {
       <button
         className="btn alt"
         disabled={busy || ph !== "roll"}
-        onClick={() => onUse({})}
+        onClick={() => onUse({ ...ex })}
       >
         Pakai {sk.name} (langsung kocok)
       </button>
@@ -714,10 +717,10 @@ function SkillPanel({ room, busy, onUse }) {
             className="btn alt"
             disabled={
               busy ||
-              (p.animal === "harimau" && t.pos < 2) ||
-              (p.animal === "singa" && t.skip)
+              (a === "harimau" && t.pos < 2) ||
+              (a === "singa" && t.skip)
             }
-            onClick={() => onUse({ target: t.id })}
+            onClick={() => onUse({ ...ex, target: t.id })}
           >
             {face(t)} {t.name}
           </button>
@@ -726,23 +729,57 @@ function SkillPanel({ room, busy, onUse }) {
     );
   }
   return (
-    <div className="ut-skill">
+    <div className={"ut-skill" + (extra ? " bonus" : "")}>
       <div className="ut-skill-h">
         <span className="ut-face" aria-hidden="true">
-          {face(p)}
+          {AMAP[a]?.e ?? "🐾"}
         </span>
-        <b>{sk.name}</b>
+        <b>
+          {sk.name}
+          {extra ? " (harta karun)" : ""}
+        </b>
         <span className={"ut-chip" + (ready ? " on" : "")}>
-          {ready
+          {extra
             ? sk.when === "passive"
-              ? "aktif otomatis"
-              : "siap"
-            : "terpakai"}
+              ? "otomatis · sekali pakai"
+              : "sekali pakai"
+            : ready
+              ? sk.when === "passive"
+                ? "aktif otomatis"
+                : "siap"
+              : "terpakai"}
         </span>
       </div>
       <p className="hint">{sk.desc}</p>
       {body && <div className="ut-sk-actions">{body}</div>}
     </div>
+  );
+}
+
+// Kartu skill untuk pemain yang sedang giliran: skill bawaan + semua skill bonus dari peti
+function SkillPanel({ room, busy, onUse }) {
+  const p = room.players[room.turn];
+  if (!p || room.status !== "playing" || p.done) return null;
+  const items = [];
+  if (p.animal && SKILLS[p.animal])
+    items.push({ key: "own", a: p.animal, extra: false });
+  (p.extra || []).forEach((a, i) =>
+    items.push({ key: "x" + i + a, a, extra: true }),
+  );
+  return (
+    <>
+      {items.map((it) => (
+        <SkillCard
+          key={it.key}
+          room={room}
+          busy={busy}
+          onUse={onUse}
+          p={p}
+          a={it.a}
+          extra={it.extra}
+        />
+      ))}
+    </>
   );
 }
 
@@ -991,7 +1028,11 @@ export default function Page() {
       }
     }).finally(() => setRolling(false));
   const useSkill = (extra) =>
-    act("skill", extra, ROLL_SKILLS.includes(room.players[room.turn]?.animal));
+    act(
+      "skill",
+      extra,
+      ROLL_SKILLS.includes(extra.extra ?? room.players[room.turn]?.animal),
+    );
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(
@@ -1247,6 +1288,7 @@ export default function Page() {
           last.kind === "shield" ||
           last.kind === "ice" ||
           last.kind === "portal_up" ||
+          last.kind === "harta" ||
           last.bonus
         ? " good"
         : "";
